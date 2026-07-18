@@ -1,0 +1,36 @@
+//@version=5
+strategy("Supertrend Strategy Enhanced", overlay=true, pyramiding=0, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Inputs
+Periods = input.int(10, title="ATR Period")
+Multiplier = input.float(3.0, title="ATR Multiplier")
+StopLossPct = input.float(1.5, title="Stop Loss (%)")
+
+// Supertrend Calculation
+atr = ta.atr(Periods)
+src = hl2
+up = src - (Multiplier * atr)
+dn = src + (Multiplier * atr)
+trend = 1
+trend := nz(trend[1], trend)
+up := close[1] > nz(up[1], up) ? math.max(up, nz(up[1], up)) : up
+dn := close[1] < nz(dn[1], dn) ? math.min(dn, nz(dn[1], dn)) : dn
+trend := trend == -1 and close > dn ? 1 : trend == 1 and close < up ? -1 : trend
+
+longCondition = trend == 1 and trend[1] == -1
+shortCondition = trend == -1 and trend[1] == 1
+
+// Strategy Execution
+if (longCondition)
+    strategy.entry("Buy", strategy.long)
+if (shortCondition)
+    strategy.close("Buy")
+    strategy.entry("Sell", strategy.short)
+if (strategy.position_size > 0)
+    strategy.exit("Exit Buy", "Buy", stop=strategy.position_avg_price * (1 - StopLossPct / 100))
+if (strategy.position_size < 0)
+    strategy.exit("Exit Sell", "Sell", stop=strategy.position_avg_price * (1 + StopLossPct / 100))
+
+// Plots
+plot(trend == 1 ? up : na, color=color.green, linewidth=2, title="Up Trend Line")
+plot(trend == -1 ? dn : na, color=color.red, linewidth=2, title="Down Trend Line")

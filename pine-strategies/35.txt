@@ -1,0 +1,243 @@
+//@version=5
+strategy(title="Reversible Line Break Chart Strategy", shorttitle="RLBC", overlay=true, max_boxes_count=500, max_bars_back=4000, max_lines_count=500, calc_on_every_tick=true)
+
+// IMPORTANT: Run this strategy on a TIME-BASED CANDLESTICK or BAR chart (e.g., 1-minute, 5-minute).
+// The strategy fetches Line Break data via request.security(), but trailing take-profit and stop-loss update on the chart's ticks.
+// Updated to plot entry signals and stop levels intra-bar in real-time, with no same-bar exits.
+// Added adjustable trend direction filter to prevent counter-trend trades (no changes to existing logic).
+
+//=============================================================================
+// 1) Time Window Filters
+//=============================================================================
+useTimeFilter = input.bool(true, title="Enable Time Filter?")
+FromMonth = input.int(4, title='From Month', minval=1, maxval=12)
+FromDay = input.int(1, title='From Day', minval=1, maxval=31)
+FromYear = input.int(2025, title='From Year', minval=2025)
+ToMonth = input.int(12, title='To Month', minval=1, maxval=12)
+ToDay = input.int(31, title='To Day', minval=1, maxval=31)
+ToYear = input.int(9999, title='To Year', minval=2029)
+
+start = timestamp(FromYear, FromMonth, FromDay, 0, 0)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+timeFilterPass = not useTimeFilter or (time >= start and time <= finish)
+
+//=============================================================================
+// 2) Strategy Inputs
+//=============================================================================
+nol = input.int(defval=3, title="Number of Lines", minval=1, tooltip="Number of Lines for Line Break reversal (e.g., 3 for three-line break)")
+base_tf = input.string("1", title="Line Break Base Timeframe", tooltip="Timeframe for Line Break data (e.g., '1' for 1 minute, '5' for 5 minutes). Match or align with chart timeframe.")
+overlay_display = input.bool(defval=false, title="Show in the Main Chart")
+gap = input.string(defval="Off", title="Gaps", options=["Off", "On"])
+
+// **Trade Mode Selection**
+tradeMode = input.string("Both", title="Trade Execution Mode", options=["Buy Only on Bullish & Sell Only on Bearish", "Both"])
+
+// **Take Profit Mode**
+takeProfitMode = input.string("On Trend Change (Default)", title="Take Profit Mode", options=["On Trend Change (Default)", "After X Bars", "Trend Change + Delay", "Trailing Take-Profit"])
+takeProfitBars = input.int(3, title="Take Profit After X Bars", minval=1, maxval=10, tooltip="Number of Line Break bars for 'After X Bars' mode")
+takeProfitDelay = input.int(5, title="New Trade Delay After Take Profit (Seconds)", minval=1, maxval=20, tooltip="Delay before new trade in 'Trend Change + Delay' mode")
+trailingPercent = input.float(1.0, title="Trailing Take-Profit %", minval=0.001, step=0.001, tooltip="Trailing % for take-profit (e.g., 1.0 = 1%)") / 100
+
+// **Trend Settings**
+showTrend = input.bool(defval=true, title="Trend", inline="trend")
+uptcol = input.color(defval=color.lime, title="Uptrend Color", inline="trend")
+dntcol = input.color(defval=color.red, title="Downtrend Color", inline="trend")
+trendwidth = input.int(defval=2, title="Trend Line Width", minval=1, maxval=5, inline="trend")
+
+// **Risk Management**
+riskmanagement = input.bool(defval=true, title="Risk Management")
+maximumrisk = input.float(defval=1.0, title="Maximum Risk %", minval=0, step=0.1, tooltip="Max risk % per trade") / 100
+
+// **Stop-Loss**
+manualStopLoss = input.float(defval=2.0, title="Manual Stop-Loss %", minval=0.001, step=0.001, tooltip="Fixed stop-loss % from entry price") / 100
+
+// **New: Trend Direction Filter (to prevent counter-trend trades)**
+useTrendFilter = input.bool(true, title="Enable Trend Direction Filter?", tooltip="If enabled, only allow longs in uptrends and shorts in downtrends.")
+trendFilterTF = input.string("D", title="Trend Filter Timeframe", tooltip="Higher TF for trend (e.g., 'D' for daily on 1m chart, '240' for 4H). Adjust for different candle ranges.")
+trendFilterType = input.string("EMA", title="Trend Filter MA Type", options=["SMA", "EMA"])
+trendFilterPeriod = input.int(200, title="Trend Filter MA Period", minval=1, tooltip="Longer period for broader trend (e.g., 200 for daily EMA).")
+trendFilterSource = input.source(close, title="Trend Filter Source", tooltip="Price source for MA (e.g., close, high, low).")
+
+// Calculate Trend Filter MA from higher TF (non-repainting)
+ma_func(src, len) => trendFilterType == "EMA" ? ta.ema(src, len) : ta.sma(src, len)
+trendFilterMA = request.security(syminfo.tickerid, trendFilterTF, ma_func(trendFilterSource, trendFilterPeriod), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+overall_trend = close > trendFilterMA ? 1 : close < trendFilterMA ? -1 : 0  // 1=up, -1=down, 0=neutral (but we use strict >/<)
+
+// Line Break Data (non-repainting fetch)
+lb_ticker = ticker.linebreak(syminfo.tickerid, nol)
+lb_time_expr = time[barstate.isconfirmed ? 0 : 1]
+lb_open_expr = open[barstate.isconfirmed ? 0 : 1]
+lb_high_expr = high[barstate.isconfirmed ? 0 : 1]
+lb_low_expr = low[barstate.isconfirmed ? 0 : 1]
+lb_close_expr = close[barstate.isconfirmed ? 0 : 1]
+[lb_time, lb_open, lb_high, lb_low, lb_close] = request.security(lb_ticker, base_tf, [lb_time_expr, lb_open_expr, lb_high_expr, lb_low_expr, lb_close_expr], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_off)
+
+//=============================================================================
+// 3) Strategy Conditions
+//=============================================================================
+trend = na(lb_close) ? na : lb_close >= lb_open ? 1 : -1
+trendlevel = na(trend) ? na : trend == 1 ? math.min(lb_close, lb_open) : math.max(lb_close, lb_open)
+new_lb_bar = not na(lb_time) and (na(lb_time[1]) or lb_time > lb_time[1])
+risk_too_high = riskmanagement and (maximumrisk < math.abs(lb_open - trendlevel) / lb_open)
+
+// **Order Entry Conditions (added trend filter)**
+long_condition = new_lb_bar and (tradeMode == "Both" or tradeMode == "Buy Only on Bullish & Sell Only on Bearish") and trend == -1 and not risk_too_high and (not useTrendFilter or overall_trend == 1)
+short_condition = new_lb_bar and (tradeMode == "Both" or tradeMode == "Buy Only on Bullish & Sell Only on Bearish") and trend == 1 and not risk_too_high and (not useTrendFilter or overall_trend == -1)
+
+// **Take Profit Conditions**
+var int barCount = 0
+if new_lb_bar
+    barCount := trend == trend[1] ? barCount + 1 : 0
+
+var float lastTradeTimestamp = na
+tradeReady = na(lastTradeTimestamp) or (time > lastTradeTimestamp + takeProfitDelay * 1000)
+
+// Trailing Variables
+var float longMaxPrice = na
+var float longTrail = na
+var float shortMinPrice = na
+var float shortTrail = na
+
+// Entry Bar Tracking to Prevent Same-Bar Exits
+var int longEntryBar = na
+var int shortEntryBar = na
+
+// Intrabar approximation for trailing in backtest, and real-time updates
+bool intrabarLongTrailHit = false
+bool intrabarShortTrailHit = false
+
+if takeProfitMode == "Trailing Take-Profit" and bar_index > longEntryBar
+    if strategy.position_size > 0
+        // Intrabar: check high first, update trail, then check low
+        float updatedMax = math.max(longMaxPrice, high)
+        float updatedTrail = updatedMax * (1 - trailingPercent)
+        if low <= updatedTrail
+            intrabarLongTrailHit := true
+if takeProfitMode == "Trailing Take-Profit" and bar_index > shortEntryBar
+    if strategy.position_size < 0
+        // Intrabar: check low first, update trail, then check high
+        float updatedMin = math.min(shortMinPrice, low)
+        float updatedTrail = updatedMin * (1 + trailingPercent)
+        if high >= updatedTrail
+            intrabarShortTrailHit := true
+
+// Regular trailing update with close (for real-time and continued trailing)
+if strategy.position_size > 0
+    if na(longMaxPrice)
+        longMaxPrice := close
+        longTrail := close * (1 - trailingPercent)
+    else
+        longMaxPrice := math.max(longMaxPrice, close)
+        longTrail := longMaxPrice * (1 - trailingPercent)
+if strategy.position_size < 0
+    if na(shortMinPrice)
+        shortMinPrice := close
+        shortTrail := close * (1 + trailingPercent)
+    else
+        shortMinPrice := math.min(shortMinPrice, close)
+        shortTrail := shortMinPrice * (1 + trailingPercent)
+
+takeProfitLong = ((takeProfitMode == "On Trend Change (Default)" and new_lb_bar and trend == 1) or 
+                 (takeProfitMode == "After X Bars" and new_lb_bar and barCount >= takeProfitBars) or 
+                 (takeProfitMode == "Trend Change + Delay" and new_lb_bar and trend == 1 and tradeReady) or
+                 (takeProfitMode == "Trailing Take-Profit" and strategy.position_size > 0 and (close <= longTrail or intrabarLongTrailHit))) and bar_index > longEntryBar
+
+takeProfitShort = ((takeProfitMode == "On Trend Change (Default)" and new_lb_bar and trend == -1) or 
+                  (takeProfitMode == "After X Bars" and new_lb_bar and barCount >= takeProfitBars) or 
+                  (takeProfitMode == "Trend Change + Delay" and new_lb_bar and trend == -1 and tradeReady) or
+                  (takeProfitMode == "Trailing Take-Profit" and strategy.position_size < 0 and (close >= shortTrail or intrabarShortTrailHit))) and bar_index > shortEntryBar
+
+//=============================================================================
+// 4) Trade Execution with Webhooks for Bitget
+//=============================================================================
+canTrade = timeFilterPass
+longCondFinal = long_condition and canTrade and tradeReady
+shortCondFinal = short_condition and canTrade and tradeReady
+closeLongFinal = takeProfitLong and canTrade
+closeShortFinal = takeProfitShort and canTrade
+
+// Track entry prices for stop-loss
+var float longEntryPrice = na
+var float shortEntryPrice = na
+if longCondFinal
+    longEntryPrice := close
+    longEntryBar := bar_index
+if shortCondFinal
+    shortEntryPrice := close
+    shortEntryBar := bar_index
+
+// ** Close Long **
+if closeLongFinal
+    strategy.close("Long", comment="Closing Long on Take Profit")
+    alert('{ "action": "close", "posSide": "long", "symbol": "ASTERUSDT", "orderType": "market", "reduceOnly": true, "timestamp": "{{timenow}}" }', alert.freq_once_per_bar_close)
+    lastTradeTimestamp := time
+    longMaxPrice := na
+    longTrail := na
+    longEntryPrice := na
+    longEntryBar := na
+
+// ** Close Short **
+if closeShortFinal
+    strategy.close("Short", comment="Closing Short on Take Profit")
+    alert('{ "action": "close", "posSide": "short", "symbol": "ASTERUSDT", "orderType": "market", "reduceOnly": true, "timestamp": "{{timenow}}" }', alert.freq_once_per_bar_close)
+    lastTradeTimestamp := time
+    shortMinPrice := na
+    shortTrail := na
+    shortEntryPrice := na
+    shortEntryBar := na
+
+// ** Open Long **
+if longCondFinal
+    strategy.entry("Long", strategy.long, stop=trendlevel)
+    if not na(longEntryPrice)
+        strategy.exit("Stop Loss", "Long", stop=longEntryPrice * (1 - manualStopLoss))
+    alert('{ "action": "open", "posSide": "long", "symbol": "ASTERUSDT", "orderType": "market", "reduceOnly": false, "timestamp": "{{timenow}}" }', alert.freq_once_per_bar_close)
+    lastTradeTimestamp := time
+
+// ** Open Short **
+if shortCondFinal
+    strategy.entry("Short", strategy.short, stop=trendlevel)
+    if not na(shortEntryPrice)
+        strategy.exit("Stop Loss", "Short", stop=shortEntryPrice * (1 + manualStopLoss))
+    alert('{ "action": "open", "posSide": "short", "symbol": "ASTERUSDT", "orderType": "market", "reduceOnly": false, "timestamp": "{{timenow}}" }', alert.freq_once_per_bar_close)
+    lastTradeTimestamp := time
+
+//=============================================================================
+// 5) Plotting
+//=============================================================================
+plot(showTrend ? trendlevel : na, title="Trend Level", color=trend == 1 ? uptcol : dntcol, linewidth=trendwidth)
+// Entry labels (visible intra-bar in real-time)
+plotshape(longCondFinal, title="Buy Signal (Entry Long)", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(shortCondFinal, title="Sell Signal (Entry Short)", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+// Exit labels (REPAIRED: Changed text to "EXIT", color to blue—stops parasites, distinguishes from entries)
+plotshape(closeLongFinal, title="Sell Signal (Close Long)", location=location.abovebar, color=color.blue, style=shape.labeldown, text="EXIT")
+plotshape(closeShortFinal, title="Buy Signal (Close Short)", location=location.belowbar, color=color.blue, style=shape.labelup, text="EXIT")
+
+// Plot Stop-Loss Levels as Lines (visible immediately at entry, updating intra-bar)
+var line longStopLine = na
+var line shortStopLine = na
+
+if strategy.position_size > 0
+    float longStopLevel = longEntryPrice * (1 - manualStopLoss)
+    if na(longStopLine)
+        longStopLine := line.new(bar_index, longStopLevel, bar_index + 1, longStopLevel, color=color.red, width=2, style=line.style_dashed)
+    else
+        line.set_xy1(longStopLine, bar_index, longStopLevel)
+        line.set_xy2(longStopLine, bar_index + 1, longStopLevel)
+else if not na(longStopLine)
+    line.delete(longStopLine)
+    longStopLine := na
+
+if strategy.position_size < 0
+    float shortStopLevel = shortEntryPrice * (1 + manualStopLoss)
+    if na(shortStopLine)
+        shortStopLine := line.new(bar_index, shortStopLevel, bar_index + 1, shortStopLevel, color=color.orange, width=2, style=line.style_dashed)
+    else
+        line.set_xy1(shortStopLine, bar_index, shortStopLevel)
+        line.set_xy2(shortStopLine, bar_index + 1, shortStopLevel)
+else if not na(shortStopLine)
+    line.delete(shortStopLine)
+    shortStopLine := na
+
+// Plot Trend Filter MA for Visual Confirmation (optional, dashed line)
+plot(useTrendFilter ? trendFilterMA : na, title="Trend Filter MA", color=color.blue, linewidth=2, style=plot.style_linebr)

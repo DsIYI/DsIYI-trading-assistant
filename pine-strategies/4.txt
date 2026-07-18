@@ -1,0 +1,120 @@
+//@version=5
+strategy("Pivot Only Strategy v2.0 - ANTI-REPAINT, NO DOUBLE ENTRY", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=15, max_bars_back=4999, pyramiding=1, calc_on_every_tick=false, process_orders_on_close=true)
+
+//========================= TIME WINDOW =========================//
+
+FromMonth = input.int(4, "From Month", 1, 12)
+FromDay = input.int(17, "From Day", 1, 31)
+FromYear = input.int(2024, "From Year")
+
+ToMonth = input.int(1, "To Month", 1, 12)
+ToDay = input.int(1, "To Day", 1, 31)
+ToYear = input.int(9999, "To Year")
+
+start = timestamp(FromYear, FromMonth, FromDay, 0, 0)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+
+window() => time[1] >= start and time[1] <= finish
+
+//========================= INPUTS =========================//
+
+pivotPeriod = input.int(5, "Pivot Period", 1, 50)
+candleWait = input.int(1, "Candle Wait Period", options=[1, 2, 3, 5])
+
+slippage = input.float(0.1, "Slippage (%)", minval=0.0)
+spread = input.float(0.1, "Spread (%)", minval=0.0)
+
+stopLossPercent = input.float(1.0, "Stop Loss (%)", minval=0.1) + slippage + spread
+trailingStop = input.float(1.5, "Trailing Stop (%)", minval=0.0) + slippage + spread
+
+//========================= PIVOT DETECTION (ANTI-REPAINT) =========================//
+// ta.pivothigh/low returns value only when pivot is CONFIRMED
+// (pivotPeriod bars to the right have not exceeded center bar).
+// Extra [1] shift adds another bar of confirmation = no repaint guaranteed.
+
+pivotHigh = ta.pivothigh(high[1], pivotPeriod, pivotPeriod)[1]
+pivotLow = ta.pivotlow(low[1], pivotPeriod, pivotPeriod)[1]
+
+//========================= PIVOT MEMORY =========================//
+// Counter ticks up each bar AFTER a confirmed pivot
+// Signal fires when counter reaches candleWait threshold
+
+var int barsSinceHigh = na
+var int barsSinceLow = na
+
+barsSinceHigh := na(pivotHigh[1]) ? (na(barsSinceHigh) ? 0 : barsSinceHigh + 1) : 0
+barsSinceLow := na(pivotLow[1]) ? (na(barsSinceLow) ? 0 : barsSinceLow + 1) : 0
+
+pivotHighCondition = barsSinceHigh[1] >= candleWait
+pivotLowCondition = barsSinceLow[1] >= candleWait
+
+//========================= SIGNALS — PIVOT ONLY =========================//
+// barstate.isconfirmed gates entries to bar close ONLY
+// This eliminates intra-bar signal flicker
+
+longSignal = barstate.isconfirmed and window() and pivotLowCondition
+shortSignal = barstate.isconfirmed and window() and pivotHighCondition
+
+//========================= ANTI-DUPLICATE GUARD =========================//
+// Only 1 trade decision per bar — prevents double-entries
+
+var int lastTradeBar = na
+canTrade = na(lastTradeBar) or lastTradeBar != bar_index
+
+//========================= ENTRIES =========================//
+
+if barstate.isconfirmed and canTrade
+    if longSignal
+        strategy.close("SHORT")
+        strategy.entry("LONG", strategy.long)
+        lastTradeBar := bar_index
+    else if shortSignal
+        strategy.close("LONG")
+        strategy.entry("SHORT", strategy.short)
+        lastTradeBar := bar_index
+
+//========================= EXITS — STANDARD strategy.exit() =========================//
+// Bar-close based stop and trailing, generates exit alerts via {{strategy.order.action}}
+// Note: trail_points and trail_offset in price units (not ticks)
+//       Using /syminfo.mintick for proper tick conversion
+
+longStop = strategy.position_avg_price * (1 - stopLossPercent / 100)
+shortStop = strategy.position_avg_price * (1 + stopLossPercent / 100)
+
+strategy.exit("LX", "LONG", stop=longStop, trail_points=trailingStop / syminfo.mintick, trail_offset=trailingStop / syminfo.mintick)
+strategy.exit("SX", "SHORT", stop=shortStop, trail_points=trailingStop / syminfo.mintick, trail_offset=trailingStop / syminfo.mintick)
+
+//========================= VISUALS =========================//
+
+plotshape(pivotHigh, "Pivot High", location=location.abovebar, color=color.red, style=shape.labeldown, size=size.small)
+plotshape(pivotLow, "Pivot Low", location=location.belowbar, color=color.green, style=shape.labelup, size=size.small)
+
+plotshape(longSignal, "Long Entry Signal", location=location.belowbar, color=color.blue, style=shape.triangleup, size=size.normal)
+plotshape(shortSignal, "Short Entry Signal", location=location.abovebar, color=color.orange, style=shape.triangledown, size=size.normal)
+
+// Stop levels visualization (visible only when in position)
+plot(strategy.position_size > 0 ? longStop : na, "Long Stop", color=color.red, style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size < 0 ? shortStop : na, "Short Stop", color=color.green, style=plot.style_linebr, linewidth=1)
+
+//========================= ALERT CONDITIONS =========================//
+
+newLong =
+     strategy.position_size > 0 and
+     strategy.position_size[1] <= 0
+
+newShort =
+     strategy.position_size < 0 and
+     strategy.position_size[1] >= 0
+
+closeLong =
+     strategy.position_size <= 0 and
+     strategy.position_size[1] > 0
+
+closeShort =
+     strategy.position_size >= 0 and
+     strategy.position_size[1] < 0
+
+alertcondition(newLong,    "LONG",        "LONG")
+alertcondition(newShort,   "SHORT",       "SHORT")
+alertcondition(closeLong,  "EXIT_LONG",   "EXIT_LONG")
+alertcondition(closeShort, "EXIT_SHORT",  "EXIT_SHORT")

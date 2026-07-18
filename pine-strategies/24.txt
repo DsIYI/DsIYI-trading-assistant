@@ -1,0 +1,335 @@
+//@version=5
+strategy('LRBBP HA Strategy [Optimized]', 
+         shorttitle='LRBBP_HA_Pro', 
+         overlay=true,
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=100,
+         commission_type=strategy.commission.percent,
+         commission_value=0.055,
+         pyramiding=0)
+
+//══════════════════════════════════════════════════════════════════════════════
+// TIMING SETTINGS
+//══════════════════════════════════════════════════════════════════════════════
+g_time = "Backtesting Period"
+FromMonth = input.int(9, 'From Month', minval=1, maxval=12, group=g_time)
+FromDay   = input.int(1, 'From Day', minval=1, maxval=31, group=g_time)
+FromYear  = input.int(2018, 'From Year', minval=2000, group=g_time)
+ToMonth   = input.int(1, 'To Month', minval=1, maxval=12, group=g_time)
+ToDay     = input.int(1, 'To Day', minval=1, maxval=31, group=g_time)
+ToYear    = input.int(9999, 'To Year', minval=2000, group=g_time)
+
+start  = timestamp(FromYear, FromMonth, FromDay, 0, 0)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+in_time_window = time >= start and time <= finish
+
+//══════════════════════════════════════════════════════════════════════════════
+// HEIKIN ASHI CALCULATIONS
+//══════════════════════════════════════════════════════════════════════════════
+var float haOpen = na
+haClose = (open + high + low + close) / 4
+haOpen := na(haOpen[1]) ? (open + close) / 2 : (haOpen[1] + haClose[1]) / 2
+haHigh = math.max(high, math.max(haOpen, haClose))
+haLow = math.min(low, math.min(haOpen, haClose))
+
+isGreenCandle = haClose > haOpen
+isRedCandle = haClose < haOpen
+
+//══════════════════════════════════════════════════════════════════════════════
+// LINEAR REGRESSION BULL/BEAR POWER
+//══════════════════════════════════════════════════════════════════════════════
+g_lrbbp = "LRBBP Settings"
+window = input.int(10, 'Lookback Window', minval=5, maxval=50, group=g_lrbbp)
+smooth = input.bool(true, 'Smooth?', group=g_lrbbp)
+smap = input.int(5, 'Smooth Factor', minval=2, maxval=10, group=g_lrbbp)
+sigma = input.int(6, 'Sigma', minval=1, maxval=20, group=g_lrbbp)
+
+f_exp_lr(_height, _length) =>
+    _height + _height / _length
+
+h_value = ta.highest(close, window)
+l_value = ta.lowest(close, window)
+h_bar = bar_index - ta.highestbars(close, window)
+l_bar = bar_index - ta.lowestbars(close, window)
+
+bear_raw = f_exp_lr(h_value - close, bar_index - h_bar)
+bear = 0 - (bear_raw > 0 ? bear_raw : 0)
+
+bull_raw = f_exp_lr(close - l_value, bar_index - l_bar)
+bull = 0 + (bull_raw > 0 ? bull_raw : 0)
+
+alma_direction = ta.alma(bull + bear, smap, 0.9, sigma)
+direction = smooth ? alma_direction : (bull * 3 + bear * 3)
+
+//══════════════════════════════════════════════════════════════════════════════
+// ZERO LAG EMA
+//══════════════════════════════════════════════════════════════════════════════
+g_zlema = "ZLEMA Settings"
+zlemaLength = input.int(10, 'ZLEMA Length', minval=5, maxval=100, group=g_zlema)
+
+ema1 = ta.ema(close, zlemaLength)
+ema2 = ta.ema(ema1, zlemaLength)
+d = ema1 - ema2
+zlema = ema1 + d
+
+//══════════════════════════════════════════════════════════════════════════════
+// ADDITIONAL FILTERS
+//══════════════════════════════════════════════════════════════════════════════
+g_filters = "Additional Filters"
+
+// Volume Filter
+useVolumeFilter = input.bool(true, "Enable Volume Filter?", group=g_filters)
+volumeLength = input.int(20, "Volume MA Length", minval=10, maxval=100, group=g_filters)
+volumeMultiplier = input.float(1.2, "Volume Multiplier", minval=1.0, maxval=3.0, step=0.1, group=g_filters)
+
+volMA = ta.sma(volume, volumeLength)
+volumeConfirm = not useVolumeFilter or volume > volMA * volumeMultiplier
+
+// ATR Volatility Filter
+useATRFilter = input.bool(true, "Enable ATR Filter?", group=g_filters)
+atrLength = input.int(14, "ATR Length", minval=5, maxval=50, group=g_filters)
+minATRPercent = input.float(1.0, "Min ATR %", minval=0.3, maxval=5.0, step=0.1, group=g_filters)
+maxATRPercent = input.float(10.0, "Max ATR %", minval=3.0, maxval=20.0, step=0.5, group=g_filters)
+
+atr = ta.atr(atrLength)
+atrPercent = (atr / close) * 100
+atrValid = not useATRFilter or (atrPercent >= minATRPercent and atrPercent <= maxATRPercent)
+
+// Higher Timeframe Trend Filter
+useHTFTrend = input.bool(true, "Enable HTF Trend Filter?", group=g_filters)
+htfTimeframe = input.timeframe("60", "HTF Timeframe", group=g_filters)
+htfEMALength = input.int(50, "HTF EMA Length", minval=20, maxval=200, group=g_filters)
+
+htfEMA = request.security(syminfo.tickerid, htfTimeframe, ta.ema(close, htfEMALength), lookahead=barmerge.lookahead_off)
+htfBullish = not useHTFTrend or close > htfEMA
+htfBearish = not useHTFTrend or close < htfEMA
+
+//══════════════════════════════════════════════════════════════════════════════
+// RISK MANAGEMENT
+//══════════════════════════════════════════════════════════════════════════════
+g_risk = "Risk Management"
+
+// ATR-based Stop Loss
+useATRStops = input.bool(true, "Use ATR-Based Stops?", group=g_risk)
+atrMultiplierSL = input.float(2.0, "ATR Multiplier (SL)", minval=0.5, maxval=5.0, step=0.1, group=g_risk)
+atrMultiplierTP = input.float(4.0, "ATR Multiplier (TP)", minval=1.0, maxval=10.0, step=0.5, group=g_risk)
+
+// Fixed % Stop Loss
+fixedSLPercent = input.float(2.0, "Fixed Stop Loss %", minval=0.5, maxval=10.0, step=0.1, group=g_risk)
+fixedTPPercent = input.float(4.0, "Fixed Take Profit %", minval=1.0, maxval=20.0, step=0.5, group=g_risk)
+
+// Trailing Stop
+useTrailing = input.bool(true, "Enable Trailing Stop?", group=g_risk)
+trailingActivation = input.float(2.0, "Trailing Activation %", minval=0.5, maxval=5.0, step=0.1, group=g_risk)
+trailingOffset = input.float(1.0, "Trailing Offset %", minval=0.3, maxval=3.0, step=0.1, group=g_risk)
+
+// Time-based Exit
+useTimeExit = input.bool(false, "Enable Time-Based Exit?", group=g_risk)
+maxBarsInTrade = input.int(50, "Max Bars in Trade", minval=10, maxval=200, group=g_risk)
+
+// Consecutive Loss Protection
+useConsecLossProtection = input.bool(true, "Enable Consecutive Loss Protection?", group=g_risk)
+maxConsecutiveLosses = input.int(3, "Max Consecutive Losses", minval=2, maxval=10, group=g_risk)
+
+//══════════════════════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS
+//══════════════════════════════════════════════════════════════════════════════
+
+// Original conditions
+longConditionBase = haClose > zlema and isGreenCandle
+shortConditionBase = haClose < zlema and isRedCandle
+
+// Direction momentum
+directionUp = smooth ? direction > direction[1] : direction > bull
+directionDown = smooth ? direction < direction[1] : direction < bear
+
+// Final signals with all filters
+longSignal = longConditionBase and directionUp and volumeConfirm and atrValid and htfBullish
+shortSignal = shortConditionBase and directionDown and volumeConfirm and atrValid and htfBearish
+
+//══════════════════════════════════════════════════════════════════════════════
+// CONSECUTIVE LOSS TRACKING
+//══════════════════════════════════════════════════════════════════════════════
+var int consecutiveLosses = 0
+
+if strategy.closedtrades > 0
+    lastProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if lastProfit < 0
+        consecutiveLosses += 1
+    else
+        consecutiveLosses := 0
+
+tradingAllowed = not useConsecLossProtection or consecutiveLosses < maxConsecutiveLosses
+
+//══════════════════════════════════════════════════════════════════════════════
+// POSITION TRACKING
+//══════════════════════════════════════════════════════════════════════════════
+var int barsInTrade = 0
+var float entryPrice = na
+
+// *** ВАЖНО: Дефинираме SL/TP като var variables ***
+var float longSL = na
+var float longTP = na
+var float shortSL = na
+var float shortTP = na
+
+isLong = strategy.position_size > 0
+isShort = strategy.position_size < 0
+isFlat = strategy.position_size == 0
+
+if not isFlat
+    barsInTrade += 1
+else
+    barsInTrade := 0
+
+// Time-based exit condition
+timeExitCondition = useTimeExit and barsInTrade >= maxBarsInTrade
+
+//══════════════════════════════════════════════════════════════════════════════
+// ENTRY LOGIC
+//══════════════════════════════════════════════════════════════════════════════
+
+if in_time_window and tradingAllowed
+    if longSignal and isFlat
+        entryPrice := close
+        
+        // Calculate SL/TP
+        if useATRStops
+            longSL := entryPrice - atr * atrMultiplierSL
+            longTP := entryPrice + atr * atrMultiplierTP
+        else
+            longSL := entryPrice * (1 - fixedSLPercent / 100)
+            longTP := entryPrice * (1 + fixedTPPercent / 100)
+        
+        // Entry
+        strategy.entry('Long', strategy.long, comment="🟢 LONG")
+        
+        // Set exits
+        if useTrailing
+            trailActivation = entryPrice * (1 + trailingActivation / 100)
+            trailOffset_val = entryPrice * (trailingOffset / 100)
+            strategy.exit('Exit Long', 'Long', 
+                         stop=longSL, 
+                         limit=longTP,
+                         trail_price=trailActivation,
+                         trail_offset=trailOffset_val)
+        else
+            strategy.exit('Exit Long', 'Long', 
+                         stop=longSL, 
+                         limit=longTP)
+    
+    if shortSignal and isFlat
+        entryPrice := close
+        
+        // Calculate SL/TP
+        if useATRStops
+            shortSL := entryPrice + atr * atrMultiplierSL
+            shortTP := entryPrice - atr * atrMultiplierTP
+        else
+            shortSL := entryPrice * (1 + fixedSLPercent / 100)
+            shortTP := entryPrice * (1 - fixedTPPercent / 100)
+        
+        // Entry
+        strategy.entry('Short', strategy.short, comment="🔴 SHORT")
+        
+        // Set exits
+        if useTrailing
+            trailActivation = entryPrice * (1 - trailingActivation / 100)
+            trailOffset_val = entryPrice * (trailingOffset / 100)
+            strategy.exit('Exit Short', 'Short', 
+                         stop=shortSL, 
+                         limit=shortTP,
+                         trail_price=trailActivation,
+                         trail_offset=trailOffset_val)
+        else
+            strategy.exit('Exit Short', 'Short', 
+                         stop=shortSL, 
+                         limit=shortTP)
+
+//══════════════════════════════════════════════════════════════════════════════
+// ADDITIONAL EXIT CONDITIONS
+//══════════════════════════════════════════════════════════════════════════════
+
+// Time-based exit
+if timeExitCondition
+    if isLong
+        strategy.close('Long', comment="⏰ Time Exit")
+    if isShort
+        strategy.close('Short', comment="⏰ Time Exit")
+
+// Opposite signal exit
+if isLong and shortSignal
+    strategy.close('Long', comment="⚠️ Reversal")
+
+if isShort and longSignal
+    strategy.close('Short', comment="⚠️ Reversal")
+
+//══════════════════════════════════════════════════════════════════════════════
+// VISUALIZATION
+//══════════════════════════════════════════════════════════════════════════════
+
+// ZLEMA
+plot(zlema, "ZLEMA", color.blue, 2)
+
+// HTF EMA
+plot(useHTFTrend ? htfEMA : na, "HTF EMA", color.orange, 2, plot.style_circles)
+
+// SL/TP levels (when in position)
+plot(isLong ? longSL : na, "Long SL", color.red, 1, plot.style_cross)
+plot(isLong ? longTP : na, "Long TP", color.green, 1, plot.style_cross)
+plot(isShort ? shortSL : na, "Short SL", color.red, 1, plot.style_cross)
+plot(isShort ? shortTP : na, "Short TP", color.green, 1, plot.style_cross)
+
+// Signals
+plotshape(longSignal and tradingAllowed, "Long", shape.triangleup, location.belowbar, 
+         color.new(color.lime, 0), size=size.normal, text="BUY")
+plotshape(shortSignal and tradingAllowed, "Short", shape.triangledown, location.abovebar, 
+         color.new(color.red, 0), size=size.normal, text="SELL")
+
+// Warning for consecutive losses
+plotshape(consecutiveLosses >= maxConsecutiveLosses - 1, "Warning", shape.xcross, location.top, 
+         color.new(color.orange, 0), size=size.small)
+
+// Background
+bgcolor(isLong ? color.new(color.green, 95) : isShort ? color.new(color.red, 95) : na)
+bgcolor(not tradingAllowed ? color.new(color.red, 85) : na, title="Trading Blocked")
+
+// Info table
+var table infoTable = table.new(position.top_right, 2, 9, border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Metric", bgcolor=color.gray, text_color=color.white)
+    table.cell(infoTable, 1, 0, "Value", bgcolor=color.gray, text_color=color.white)
+    
+    table.cell(infoTable, 0, 1, "Position", text_color=color.white)
+    posText = isLong ? "LONG" : isShort ? "SHORT" : "FLAT"
+    posColor = isLong ? color.lime : isShort ? color.red : color.gray
+    table.cell(infoTable, 1, 1, posText, text_color=posColor)
+    
+    table.cell(infoTable, 0, 2, "Entry Price", text_color=color.white)
+    table.cell(infoTable, 1, 2, not isFlat ? str.tostring(entryPrice, "#.####") : "-", text_color=color.white)
+    
+    table.cell(infoTable, 0, 3, "Stop Loss", text_color=color.white)
+    slPrice = isLong ? longSL : isShort ? shortSL : na
+    table.cell(infoTable, 1, 3, not isFlat ? str.tostring(slPrice, "#.####") : "-", text_color=color.red)
+    
+    table.cell(infoTable, 0, 4, "Take Profit", text_color=color.white)
+    tpPrice = isLong ? longTP : isShort ? shortTP : na
+    table.cell(infoTable, 1, 4, not isFlat ? str.tostring(tpPrice, "#.####") : "-", text_color=color.green)
+    
+    table.cell(infoTable, 0, 5, "ATR %", text_color=color.white)
+    table.cell(infoTable, 1, 5, str.tostring(atrPercent, "#.##") + "%", text_color=color.white)
+    
+    table.cell(infoTable, 0, 6, "Consec. Losses", text_color=color.white)
+    lossColor = consecutiveLosses >= 2 ? color.orange : color.white
+    table.cell(infoTable, 1, 6, str.tostring(consecutiveLosses), text_color=lossColor)
+    
+    table.cell(infoTable, 0, 7, "Win Rate", text_color=color.white)
+    winRate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0
+    table.cell(infoTable, 1, 7, str.tostring(winRate, "#.#") + "%", 
+              text_color=winRate > 50 ? color.lime : color.red)
+    
+    table.cell(infoTable, 0, 8, "Profit Factor", text_color=color.white)
+    pf = strategy.grossprofit / (strategy.grossloss != 0 ? math.abs(strategy.grossloss) : 1)
+    table.cell(infoTable, 1, 8, str.tostring(pf, "#.##"), 
+              text_color=pf > 1.5 ? color.lime : pf > 1.0 ? color.yellow : color.red)

@@ -1,0 +1,261 @@
+//@version=5
+strategy("Anti-Scalp Strategy - PRIORITY FILTERS", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, max_bars_back=4999)
+
+// Timing settings
+FromMonth = input.int(defval=4, title='From Month', minval=1, maxval=12)
+FromDay = input.int(defval=17, title='From Day', minval=1, maxval=31)
+FromYear = input.int(defval=2024, title='From Year', minval=2024)
+ToMonth = input.int(defval=1, title='To Month', minval=1, maxval=12)
+ToDay = input.int(defval=1, title='To Day', minval=1, maxval=31)
+ToYear = input.int(defval=9999, title='To Year', minval=2024)
+start = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+window() =>
+    time >= start and time <= finish
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🛡️ ПРИОРИТЕТНИ ANTI-SCALP ФИЛТРИ (РАБОТЯТ ПЪРВИ!)
+// ═══════════════════════════════════════════════════════════════════════════════
+minBarsInPosition = input.int(defval=2, title="⏱️ PRIORITY: Minimum Bars in Position", minval=0, maxval=100, 
+     tooltip="АБСОЛЮТЕН ПРИОРИТЕТ! Позицията НЕ МОЖЕ да се затвори преди този брой барове.", group="🛡️ ANTI-SCALP FILTERS")
+
+minProfitToClose = input.float(defval=0.5, title="💰 PRIORITY: Min Profit % to Close", minval=0.0, maxval=10.0, step=0.1,
+     tooltip="АБСОЛЮТЕН ПРИОРИТЕТ! Позицията се затваря САМО при тази минимална печалба (освен при emergency stop).", group="🛡️ ANTI-SCALP FILTERS")
+
+minBarsBetweenTrades = input.int(defval=3, title="⏳ Min Bars Between Trades", minval=0, maxval=50,
+     tooltip="Минимален брой барове между два трейда", group="🛡️ ANTI-SCALP FILTERS")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EMERGENCY STOP-LOSS (единственото изключение от приоритетните филтри)
+// ═══════════════════════════════════════════════════════════════════════════════
+emergencyStopLoss = input.float(defval=3.0, title="🚨 Emergency Stop-Loss (%)", minval=0.0001, maxval=20.0, step=0.5,
+     tooltip="ЕДИНСТВЕНОТО изключение! Ако загубата надвиши това %, позицията се затваря ВЕДНАГА независимо от другите филтри.", group="🛡️ ANTI-SCALP FILTERS")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// НАСТРОЙКИ ЗА ПОСОКА НА ТЪРГОВИЯ
+// ═══════════════════════════════════════════════════════════════════════════════
+tradeDirection = input.string(defval="Both", title="📊 Trade Direction", options=["Long Only", "Short Only", "Both"], group="Trade Settings")
+
+allowLong = tradeDirection == "Long Only" or tradeDirection == "Both"
+allowShort = tradeDirection == "Short Only" or tradeDirection == "Both"
+
+// Pivot Point settings
+pivotPeriod = input.int(defval=5, title="Pivot Period", minval=1, maxval=50, group="Indicators")
+
+// EMA and Volume Filter settings
+emaLength = input.int(defval=9, title="EMA Length", group="Indicators")
+volumeLookback = input.int(defval=50, title="Volume Lookback", group="Indicators")
+
+// Slippage and Spread
+slippage = input.float(defval=0.1, title="Slippage (%)", group="Costs")
+spread = input.float(defval=0.1, title="Spread (%)", group="Costs")
+
+// Take Profit (опционално)
+takeProfitPercent = input.float(defval=2.0, title="💵 Take Profit (%)", minval=0.5, maxval=20.0, step=0.5, group="Profit Settings")
+
+// Trailing Stop настройки
+useTrailingStop = input.bool(defval=true, title="Use Trailing Stop?", group="Profit Settings")
+trailingStopPercent = input.float(defval=1.0, title="Trailing Stop (%)", minval=0.1, maxval=10.0, step=0.1, group="Profit Settings")
+trailingActivation = input.float(defval=0.5, title="Trailing Activation Profit (%)", minval=0.1, maxval=5.0, step=0.1, 
+     tooltip="Trailing stop се активира САМО след тази печалба", group="Profit Settings")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ИЗЧИСЛЕНИЯ
+// ═══════════════════════════════════════════════════════════════════════════════
+emaValue = ta.ema(close, emaLength)
+avgVolume = ta.sma(volume, volumeLookback)
+
+pivotHigh = ta.pivothigh(high, pivotPeriod, pivotPeriod)
+pivotLow = ta.pivotlow(low, pivotPeriod, pivotPeriod)
+
+// Plot Pivot Points
+plotshape(series=pivotHigh, location=location.abovebar, color=color.red, style=shape.labeldown, title="Pivot High")
+plotshape(series=pivotLow, location=location.belowbar, color=color.green, style=shape.labelup, title="Pivot Low")
+
+// Conditions
+pivotHighCondition = not na(pivotHigh)
+pivotLowCondition = not na(pivotLow)
+
+longConditionPivot = pivotLowCondition and window()
+shortConditionPivot = pivotHighCondition and window()
+
+longConditionEMA = (close > emaValue) and (volume > avgVolume) and window()
+shortConditionEMA = (close < emaValue) and (volume > avgVolume) and window()
+
+// Signals с филтър за посока
+longSignal = (longConditionPivot or longConditionEMA) and allowLong
+shortSignal = (shortConditionPivot or shortConditionEMA) and allowShort
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ПРОМЕНЛИВИ ЗА СЛЕДЕНЕ НА ПОЗИЦИЯТА
+// ═══════════════════════════════════════════════════════════════════════════════
+var int positionState = 0              // 0 = flat, 1 = long, -1 = short
+var int barsHeld = 0                   // брой барове в текущата позиция
+var float entryPrice = 0.0             // цена на вход
+var int barsSinceLastTrade = 100       // барове от последния трейд
+var float highestSinceEntry = 0.0      // най-висока цена от влизането (за trailing)
+var float lowestSinceEntry = 0.0       // най-ниска цена от влизането (за trailing)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// АКТУАЛИЗИРАНЕ НА БРОЯЧИТЕ
+// ═══════════════════════════════════════════════════════════════════════════════
+if positionState == 0
+    barsSinceLastTrade := barsSinceLastTrade + 1
+else
+    barsHeld := barsHeld + 1
+    // Актуализиране на trailing stop нива
+    if positionState == 1
+        highestSinceEntry := math.max(highestSinceEntry, high)
+    if positionState == -1
+        lowestSinceEntry := math.min(lowestSinceEntry, low)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ИЗЧИСЛЯВАНЕ НА ТЕКУЩА ПЕЧАЛБА/ЗАГУБА (с включени разходи)
+// ═══════════════════════════════════════════════════════════════════════════════
+totalCosts = slippage + spread
+currentProfitPercent = 0.0
+currentProfitPercentRaw = 0.0  // без разходи, за debug
+
+if positionState == 1 and entryPrice > 0
+    currentProfitPercentRaw := ((close - entryPrice) / entryPrice) * 100
+    currentProfitPercent := currentProfitPercentRaw - totalCosts
+    
+if positionState == -1 and entryPrice > 0
+    currentProfitPercentRaw := ((entryPrice - close) / entryPrice) * 100
+    currentProfitPercent := currentProfitPercentRaw - totalCosts
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🛡️ ПРИОРИТЕТНА ЛОГИКА ЗА ЗАТВАРЯНЕ
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// СТЪПКА 1: Проверка за EMERGENCY STOP-LOSS (единственото изключение!)
+isEmergencyStop = currentProfitPercent <= -emergencyStopLoss
+
+// СТЪПКА 2: Проверка за минимални барове (ПРИОРИТЕТ!)
+barsRequirementMet = barsHeld >= minBarsInPosition
+
+// СТЪПКА 3: Проверка за минимална печалба (ПРИОРИТЕТ!)
+profitRequirementMet = currentProfitPercent >= minProfitToClose
+
+// СТЪПКА 4: Take Profit
+isTakeProfit = currentProfitPercent >= takeProfitPercent
+
+// СТЪПКА 5: Trailing Stop (само ако е активиран И печалбата е над активацията)
+trailingStopHit = false
+if useTrailingStop and positionState == 1 and currentProfitPercent >= trailingActivation
+    trailingLevel = highestSinceEntry * (1 - trailingStopPercent / 100)
+    trailingStopHit := close <= trailingLevel
+    
+if useTrailingStop and positionState == -1 and currentProfitPercent >= trailingActivation
+    trailingLevel = lowestSinceEntry * (1 + trailingStopPercent / 100)
+    trailingStopHit := close >= trailingLevel
+
+// СТЪПКА 6: Обратен сигнал
+reverseSignalLong = longSignal and positionState == -1
+reverseSignalShort = shortSignal and positionState == 1
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🎯 ФИНАЛНА ЛОГИКА ЗА ЗАТВАРЯНЕ (С ПРИОРИТЕТИ!)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Може да затвори САМО ако:
+// A) Emergency stop-loss (винаги работи!) ИЛИ
+// B) Мин. барове СА изминали И (мин. печалба Е достигната ИЛИ take profit ИЛИ trailing stop ИЛИ обратен сигнал)
+
+canCloseNormally = barsRequirementMet and profitRequirementMet
+canCloseTakeProfit = barsRequirementMet and isTakeProfit
+canCloseTrailing = barsRequirementMet and profitRequirementMet and trailingStopHit
+canCloseReverse = barsRequirementMet and profitRequirementMet
+
+shouldCloseLong = positionState == 1 and (isEmergencyStop or canCloseTakeProfit or canCloseTrailing or (canCloseReverse and shortSignal))
+shouldCloseShort = positionState == -1 and (isEmergencyStop or canCloseTakeProfit or canCloseTrailing or (canCloseReverse and longSignal))
+
+// Условие за нов вход
+canEnterNewTrade = barsSinceLastTrade >= minBarsBetweenTrades
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ИЗПЪЛНЕНИЕ НА ТРЕЙДОВЕ
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ЗАТВАРЯНЕ НА LONG
+if shouldCloseLong
+    strategy.close("Long", comment=isEmergencyStop ? "EMERGENCY SL" : isTakeProfit ? "TAKE PROFIT" : trailingStopHit ? "TRAILING" : "SIGNAL")
+    positionState := 0
+    barsHeld := 0
+    entryPrice := 0.0
+    barsSinceLastTrade := 0
+    highestSinceEntry := 0.0
+
+// ЗАТВАРЯНЕ НА SHORT
+if shouldCloseShort
+    strategy.close("Short", comment=isEmergencyStop ? "EMERGENCY SL" : isTakeProfit ? "TAKE PROFIT" : trailingStopHit ? "TRAILING" : "SIGNAL")
+    positionState := 0
+    barsHeld := 0
+    entryPrice := 0.0
+    barsSinceLastTrade := 0
+    lowestSinceEntry := 0.0
+
+// ВХОД В LONG (само от flat)
+if longSignal and positionState == 0 and canEnterNewTrade
+    strategy.entry("Long", strategy.long)
+    positionState := 1
+    barsHeld := 0
+    entryPrice := close
+    barsSinceLastTrade := 0
+    highestSinceEntry := high
+
+// ВХОД В SHORT (само от flat)
+if shortSignal and positionState == 0 and canEnterNewTrade
+    strategy.entry("Short", strategy.short)
+    positionState := -1
+    barsHeld := 0
+    entryPrice := close
+    barsSinceLastTrade := 0
+    lowestSinceEntry := low
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// СИНХРОНИЗАЦИЯ (ако стратегията затвори позицията по друг начин)
+// ═══════════════════════════════════════════════════════════════════════════════
+if strategy.position_size == 0 and positionState != 0
+    positionState := 0
+    barsHeld := 0
+    entryPrice := 0.0
+    barsSinceLastTrade := 0
+    highestSinceEntry := 0.0
+    lowestSinceEntry := 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ВИЗУАЛИЗАЦИЯ
+// ═══════════════════════════════════════════════════════════════════════════════
+plot(emaValue, title="EMA", color=color.blue, linewidth=2)
+
+// Сигнали
+plotshape(series=longSignal and positionState == 0 and canEnterNewTrade, title="Long Entry Signal", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.normal)
+plotshape(series=shortSignal and positionState == 0 and canEnterNewTrade, title="Short Entry Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.normal)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEBUG INFO (Data Window)
+// ═══════════════════════════════════════════════════════════════════════════════
+plot(barsHeld, title="📊 Bars Held", color=color.yellow, display=display.data_window)
+plot(minBarsInPosition, title="📊 Min Bars Required", color=color.orange, display=display.data_window)
+plot(barsRequirementMet ? 1 : 0, title="✅ Bars Requirement Met", color=color.lime, display=display.data_window)
+
+plot(currentProfitPercent, title="💰 Current Profit %", color=color.white, display=display.data_window)
+plot(minProfitToClose, title="💰 Min Profit Required", color=color.silver, display=display.data_window)
+plot(profitRequirementMet ? 1 : 0, title="✅ Profit Requirement Met", color=color.lime, display=display.data_window)
+
+plot(positionState, title="📈 Position State (1=L, -1=S, 0=Flat)", color=color.aqua, display=display.data_window)
+plot(canEnterNewTrade ? 1 : 0, title="🚪 Can Enter New Trade", color=color.purple, display=display.data_window)
+plot(barsSinceLastTrade, title="⏳ Bars Since Last Trade", color=color.orange, display=display.data_window)
+
+plot(isEmergencyStop ? 1 : 0, title="🚨 Emergency Stop Active", color=color.red, display=display.data_window)
+plot(isTakeProfit ? 1 : 0, title="💵 Take Profit Active", color=color.green, display=display.data_window)
+plot(trailingStopHit ? 1 : 0, title="📉 Trailing Stop Hit", color=color.orange, display=display.data_window)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BACKGROUND COLORS ЗА ВИЗУАЛНА ОБРАТНА ВРЪЗКА
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Червено когато е в позиция и НЕ МОЖЕ да затвори (барове не са достигнати)
+bgcolor(positionState != 0 and not barsRequirementMet ? color.new(color.red, 85) : na, title="🔒 Bars Lock Active")
+

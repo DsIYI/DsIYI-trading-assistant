@@ -1,0 +1,46 @@
+//@version=5
+strategy("STR:EMA Oscilator [Azzrael] Improved", overlay=false, 
+ initial_capital=2000,
+ default_qty_type=strategy.percent_of_equity,
+ default_qty_value=30,
+ pyramiding=3,
+ commission_type=strategy.commission.percent,
+ commission_value=0.06)
+
+ema_length = input.int(200, "Period", minval=2, step=10)
+limit = input.float(1.7, "Factor", minval=1, step=0.1, maxval=10)
+dno = input.string(defval="Buy on enter to OverSell", title="Model", options=["Buy on enter to OverSell", "Buy on enter to OverBuy", "Both Directions"]) 
+dt_start = input.time(defval=timestamp('01 January 2001 00:00 +0000'), title='Start', group ="Backtest period")
+dt_end = input.time(defval=timestamp('01 January 2030 00:00 +0000'), title='Finish', group ="Backtest period")
+bar_in_period = time >= dt_start and time <= dt_end
+
+v = close - ta.ema(close, ema_length)
+dev = ta.stdev(v, ema_length)
+k = dno == "Buy on enter to OverSell" ? -1 : 1
+dev_limit = k * dev * limit
+
+cond_long = dno != "Buy on enter to OverBuy" and barstate.isconfirmed and bar_in_period and ta.crossunder(v, dev_limit)
+cond_short = dno != "Buy on enter to OverSell" and barstate.isconfirmed and bar_in_period and ta.crossover(v, dev_limit)
+cond_close_long = barstate.isconfirmed and bar_in_period and ta.cross(v, 0) and strategy.position_size > 0
+cond_close_short = barstate.isconfirmed and bar_in_period and ta.cross(v, 0) and strategy.position_size < 0
+
+// Entries and Exits
+if cond_long
+    strategy.entry("Long", strategy.long)
+if cond_short
+    strategy.entry("Short", strategy.short)
+if cond_close_long
+    strategy.close("Long")
+if cond_close_short
+    strategy.close("Short")
+
+// Visualization (unchanged)
+sig_col = ((dno == "Buy on enter to OverSell" and v <= dev_limit) or (dno == "Buy on enter to OverBuy" and v >= dev_limit) or (dno == "Both Directions")) ? color.green : color.new(color.blue, 80)
+plot(dev_limit, color=color.green)
+plot(k*dev, color=color.new(color.blue, 60))
+plot(v, color=sig_col)
+hline(0)
+
+// Ensure all positions are closed at the end of the backtest period
+if time >= dt_end or barstate.islastconfirmedhistory
+    strategy.close_all("End")

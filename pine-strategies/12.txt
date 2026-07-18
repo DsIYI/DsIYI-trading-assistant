@@ -1,0 +1,116 @@
+//@version=5
+strategy("Simple Trailing Buy & Stop Strategy v1.0 - Repaint-Free & Webhook", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, max_bars_back=500)
+
+// === 📅 Backtest Date Filter ===
+fromYear     = input.int(2025, "From Year")
+fromMonth    = input.int(1, "From Month")
+fromDay      = input.int(1, "From Day")
+toYear       = input.int(9999, "To Year")
+toMonth      = input.int(12, "To Month")
+toDay        = input.int(31, "To Day")
+
+startDate    = timestamp(fromYear, fromMonth, fromDay, 0, 0)
+endDate      = timestamp(toYear, toMonth, toDay, 23, 59)
+inDateRange  = time[1] >= startDate and time[1] <= endDate  // FIXED: [1] confirmed
+
+// === 📥 Strategy Inputs ===
+stopOffsetLong   = input.float(1.5,  "Stop Offset % (Long)",         minval=0.01, step=0.01)
+buyOffsetLong    = input.float(1.9,  "Trailing Buy Offset % (Long)", minval=0.01, step=0.01)
+stopOffsetShort  = input.float(1.5,  "Stop Offset % (Short)",        minval=0.01, step=0.01)
+sellOffsetShort  = input.float(1.9,  "Trailing Sell Offset % (Short)",minval=0.01, step=0.01)
+sumbars          = input.int(6,      "Use Last X Bars for Calculation", minval=1)
+
+// === 🧩 Source Inputs (All Exposed for Manual Adjustment) ===
+srcts_long       = input.source(close, "Source Trailing Stop (Long)")
+srctb_long       = input.source(close, "Source Trailing Buy (Long)")
+triggerStopLong  = input.source(low,   "Stop Trigger (Long)")
+triggerBuyLong   = input.source(high,  "Buy Trigger (Long)")
+
+srcts_short      = input.source(close, "Source Trailing Stop (Short)")
+srctb_short      = input.source(close, "Source Trailing Sell (Short)")
+triggerStopShort = input.source(high,  "Stop Trigger (Short)")
+triggerSellShort = input.source(low,   "Sell Trigger (Short)")
+
+// === 📈 Trailing Level Calculations (Historical [1] for No Repaint)
+tslRaw   = ta.rma(srcts_long[1], sumbars)[1] * (1 - stopOffsetLong / 100)  // FIXED: [1] confirmed
+tbuyRaw  = ta.rma(srctb_long[1], sumbars)[1] * (1 + buyOffsetLong / 100)  // FIXED: [1]
+tssRaw   = ta.rma(srcts_short[1], sumbars)[1] * (1 + stopOffsetShort / 100)  // FIXED: [1]
+tsellRaw = ta.rma(srctb_short[1], sumbars)[1] * (1 - sellOffsetShort / 100)  // FIXED: [1]
+
+tsl   = tslRaw[1]  // Double shift for extra safety
+tbuy  = tbuyRaw[1]
+tss   = tssRaw[1]
+tsell = tsellRaw[1]
+
+// === 🖍️ Plotting Levels ===
+plot(tsl,   color = triggerStopLong[1] < tsl ? color.red    : color.green,   title="Trailing Stop (Long)")
+plot(tbuy,  color = triggerBuyLong[1] > tbuy ? color.red    : color.green,   title="Trailing Buy (Long)")
+plot(tss,   color = triggerStopShort[1] > tss ? color.fuchsia: color.orange,  title="Trailing Stop (Short)")
+plot(tsell, color = triggerSellShort[1] < tsell ? color.fuchsia: color.orange,  title="Trailing Sell (Short)")
+
+// === 🔔 Alerts ===
+alertcondition(ta.crossunder(triggerStopLong[1], tsl),    title="Exit Long",        message="SELL")
+alertcondition(ta.crossover(triggerBuyLong[1], tbuy),     title="Enter Long",       message="BUY")
+alertcondition(ta.crossunder(triggerSellShort[1], tsell), title="Enter Short",      message="SELL SHORT")
+alertcondition(ta.crossover(triggerStopShort[1], tss),    title="Exit Short",       message="CLOSE SHORT")
+
+// === 🧠 Optional Filters (Historical [1]) ===
+useADXFilter = input.bool(false, "Use ADX Filter?")
+adxLength    = input.int(14, "ADX Length")
+adxThreshold = input.float(20.0, "ADX Threshold", step=0.1)
+[_, _, adxRaw]  = ta.dmi(adxLength, adxLength)
+adx = adxRaw[1]  // FIXED: [1]
+adxPass      = adx > adxThreshold
+
+useRangeFilter = input.bool(false, "Use Range Filter?")
+bbLen          = input.int(20, "BB Length")
+bbMult         = input.float(2.0, "BB Multiplier")
+basisRaw       = ta.sma(close[1], bbLen)[1]  // FIXED: [1]
+devRaw         = bbMult * ta.stdev(close[1], bbLen)[1]  // FIXED: [1]
+basis          = basisRaw[1]
+dev            = devRaw[1]
+bbWidthPercent = (dev * 2) / basis * 100
+rangePass      = bbWidthPercent > 1.0  // Wide enough range
+
+useRSIFilter = input.bool(false, "Use RSI Filter?")
+rsiLength    = input.int(14, "RSI Length")
+rsiValRaw    = ta.rsi(close[1], rsiLength)[1]  // FIXED: [1]
+rsiVal       = rsiValRaw[1]
+rsiPassLong  = rsiVal > 50
+rsiPassShort = rsiVal < 50
+
+// === ✅ Combined Filter Logic ===
+filterPassLong  = (not useADXFilter or adxPass) and (not useRangeFilter or rangePass) and (not useRSIFilter or rsiPassLong)
+filterPassShort = (not useADXFilter or adxPass) and (not useRangeFilter or rangePass) and (not useRSIFilter or rsiPassShort)
+
+// === 📊 Strategy Conditions (Confirmed for No Repaint)
+enterLong   = barstate.isconfirmed and ta.crossover(triggerBuyLong[1], tbuy)  // FIXED: [1] + Confirmed
+exitLong    = barstate.isconfirmed and ta.crossunder(triggerStopLong[1], tsl)  // FIXED: [1] + Confirmed
+enterShort  = barstate.isconfirmed and ta.crossunder(triggerSellShort[1], tsell)  // FIXED: [1] + Confirmed
+exitShort   = barstate.isconfirmed and ta.crossover(triggerStopShort[1], tss)  // FIXED: [1] + Confirmed
+
+// === 📈 Execute Strategy ===
+if inDateRange[1]  // FIXED: [1] confirmed
+    if (enterLong and filterPassLong)
+        strategy.entry("Long", strategy.long)
+    if (exitLong)
+        strategy.close("Long")
+
+    if (enterShort and filterPassShort)
+        strategy.entry("Short", strategy.short)
+    if (exitShort)
+        strategy.close("Short")
+
+// NEW: Webhook Alerts (Separate for Entry/Exit)
+if enterLong and filterPassLong
+    alert('{"symbol":"TAOUSDT.P","side":"buy","qty":"' + str.tostring(math.round(strategy.equity * 1.0 / close, 3)) + '","price":"' + str.tostring(close) + '","reduce_only":false,"strategy_id":"your-strategy-id","amount_type":"absolute.quantity"}', alert.freq_once_per_bar_close)
+
+if enterShort and filterPassShort
+    alert('{"symbol":"TAOUSDT.P","side":"sell","qty":"' + str.tostring(math.round(strategy.equity * 1.0 / close, 3)) + '","price":"' + str.tostring(close) + '","reduce_only":false,"strategy_id":"your-strategy-id","amount_type":"absolute.quantity"}', alert.freq_once_per_bar_close)
+
+// Exit Alerts (Reduce Only for Closes)
+if exitLong
+    alert('{"symbol":"TAOUSDT.P","side":"sell","qty":"' + str.tostring(math.abs(strategy.position_size)) + '","price":"' + str.tostring(close) + '","reduce_only":true,"strategy_id":"your-strategy-id","amount_type":"absolute.quantity"}', alert.freq_once_per_bar_close)
+
+if exitShort
+    alert('{"symbol":"TAOUSDT.P","side":"buy","qty":"' + str.tostring(math.abs(strategy.position_size)) + '","price":"' + str.tostring(close) + '","reduce_only":true,"strategy_id":"your-strategy-id","amount_type":"absolute.quantity"}', alert.freq_once_per_bar_close)

@@ -1,0 +1,94 @@
+//@version=6
+strategy("Reversal Strategy with Volume Delta + HA Trend Filter", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+//=============================================================================
+// 1) Backtesting Time Window
+//=============================================================================
+startTime = input.time(timestamp("2025-01-01 00:00"), "Start Time", group="Backtest Period")
+endTime   = input.time(timestamp("2025-12-31 23:59"), "End Time", group="Backtest Period")
+isInTimeRange = (time >= startTime and time <= endTime)
+
+//=============================================================================
+// 2) Trade Settings
+//=============================================================================
+tpMode = input.string("Reversible", "Take-Profit Mode", options=["Reversible", "Percentage"], group="Trade Settings")
+
+// Percentage Take-Profit settings
+tpPercent = input.float(0.99, "Take-Profit %", minval=0.1, step=0.01, group="Percentage TP Settings")
+slPercent = input.float(0.99, "Stop-Loss %", minval=0.1, step=0.01, group="Percentage TP Settings")
+
+//=============================================================================
+// 3) Heikin Ashi Trend Filter
+//=============================================================================
+enableTrendFilter = input.bool(true, "Enable HA Trend Filter", group="Trend Filter")
+trendLength = input.int(3, "HA Trend Strength (bars)", minval=1, group="Trend Filter")
+
+// Manual Heikin Ashi calculation (since built-in doesn't exist)
+haClose = (open + high + low + close) / 4
+var float haOpen = na
+haOpen := na(haOpen[1]) ? (open + close) / 2 : (haOpen[1] + haClose[1]) / 2
+
+bullishHA = haClose > haOpen
+bearishHA = haClose < haOpen
+
+upTrend   = ta.barssince(bullishHA == false) > trendLength
+downTrend = ta.barssince(bearishHA == false) > trendLength
+
+allowBuy  = not enableTrendFilter or upTrend
+allowSell = not enableTrendFilter or downTrend
+
+//=============================================================================
+// 4) Volume Delta Calculation
+//=============================================================================
+upAndDownVolume() =>
+    isBuyVol = close >= open or close > close[1]
+    isBuyVol ? volume : -volume
+
+volumeDelta = upAndDownVolume()
+plot(volumeDelta, title="Volume Delta", color=volumeDelta > 0 ? color.green : color.red, style=plot.style_histogram)
+hline(0, 'Zero Line', color=color.gray)
+
+//=============================================================================
+// 5) Buy/Sell Signal Logic
+//=============================================================================
+minVolume = input.int(100, "Minimum Volume", group="Signal Filter")
+
+isBuySignal  = close > open and volumeDelta > 0 and volume > minVolume and isInTimeRange
+isSellSignal = close < open and volumeDelta < 0 and volume > minVolume and isInTimeRange
+
+plotshape(isBuySignal, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small, title="Buy Signal")
+plotshape(isSellSignal, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.small, title="Sell Signal")
+
+//=============================================================================
+// 6) Strategy Execution Logic
+//=============================================================================
+longID  = "Buy"
+shortID = "Sell"
+
+// Calculate TP/SL prices based on entry
+longTP = close * (1 + tpPercent / 100)
+longSL = close * (1 - slPercent / 100)
+shortTP = close * (1 - tpPercent / 100)
+shortSL = close * (1 + slPercent / 100)
+
+if tpMode == "Reversible"
+    // Reversible mode: Opposed signals act as TP + new entry
+    if isBuySignal and allowBuy
+        if strategy.position_size < 0
+            strategy.close(shortID)
+        strategy.entry(longID, strategy.long)
+
+    if isSellSignal and allowSell
+        if strategy.position_size > 0
+            strategy.close(longID)
+        strategy.entry(shortID, strategy.short)
+
+if tpMode == "Percentage"
+    // Percentage TP mode: Exit with predefined TP/SL
+    if isBuySignal and allowBuy and strategy.position_size == 0
+        strategy.entry(longID, strategy.long)
+        strategy.exit("TP/SL Long", from_entry=longID, stop=longSL, limit=longTP)
+
+    if isSellSignal and allowSell and strategy.position_size == 0
+        strategy.entry(shortID, strategy.short)
+        strategy.exit("TP/SL Short", from_entry=shortID, stop=shortSL, limit=shortTP)

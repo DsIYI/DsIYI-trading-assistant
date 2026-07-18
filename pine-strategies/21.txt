@@ -1,0 +1,98 @@
+//@version=6
+strategy(title             = "Supertrend Strategy with EMA & Volume Filters, Reversal, and Trailing Stop",overlay           = true,default_qty_type  = strategy.percent_of_equity,default_qty_value = 15)
+
+//── 1) Rolling X-day backtest window
+daysBack = input.int(30, "Days to Backtest", minval=1)
+
+// Calculate start time (ms). 1 day = 24*60*60*1000 ms
+oneDay   = 24 * 60 * 60 * 1000
+lookback = daysBack * oneDay
+
+// `timenow` is the time of the chart’s last bar. 
+// We'll trade only if current bar’s time >= (last bar's time - X days).
+startTime          = timenow - lookback
+bool inLookbackWin = time >= startTime
+
+//── 2) Supertrend inputs
+atrPeriod         = input(2,    "ATR Length")
+factor            = input.float(0.09, "Factor", step=0.01)
+trailingStop      = input.float(1.5,  "Trailing Stop (%)", step=0.1)
+stopLossPercent   = input.float(1.0,  "Stop-Loss (%)", minval=0.1, maxval=10.0)
+
+//── 3) Additional filters
+emaLength       = 9
+volumeLookback  = 50
+
+//── 4) Non-repainting security requests
+ema2m  = request.security(syminfo.tickerid, "2", ta.ema(close, emaLength),      lookahead=barmerge.lookahead_off)
+ema5m  = request.security(syminfo.tickerid, "5", ta.ema(close, emaLength),      lookahead=barmerge.lookahead_off)
+volume2m  = request.security(syminfo.tickerid, "2", volume,                     lookahead=barmerge.lookahead_off)
+volume5m  = request.security(syminfo.tickerid, "5", volume,                     lookahead=barmerge.lookahead_off)
+avgVolume2m  = ta.sma(volume2m, volumeLookback)
+avgVolume5m  = ta.sma(volume5m, volumeLookback)
+avgVolumeCurrent = ta.sma(volume, volumeLookback)
+
+//── 5) EMA/Volume filter user options
+useEMAFilter    = input.string("Both", "Use EMA Filter for", options=["None", "2m", "5m", "Both"])
+useVolumeFilter = input.string("All",  "Use Volume Filter for", options=["None", "2m", "5m", "Current", "All"])
+
+//── 6) Supertrend calculation
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+//── 7) Entry conditions
+longCondition  = ta.change(direction) < 0 
+     and (
+          (useEMAFilter == "2m"   and close > ema2m) 
+       or (useEMAFilter == "5m"   and close > ema5m)
+       or (useEMAFilter == "Both" and close > ema2m and close > ema5m)
+     )
+
+shortCondition = ta.change(direction) > 0 
+     and (
+          (useEMAFilter == "2m"   and close < ema2m) 
+       or (useEMAFilter == "5m"   and close < ema5m)
+       or (useEMAFilter == "Both" and close < ema2m and close < ema5m)
+     )
+
+longVolume = volume > avgVolumeCurrent 
+     and (
+          (useVolumeFilter == "2m"       and volume2m > avgVolume2m)
+       or (useVolumeFilter == "5m"       and volume5m > avgVolume5m)
+       or (useVolumeFilter == "Current"  and volume > avgVolumeCurrent)
+       or (useVolumeFilter == "All")
+     )
+
+shortVolume = volume > avgVolumeCurrent
+     and (
+          (useVolumeFilter == "2m"       and volume2m > avgVolume2m)
+       or (useVolumeFilter == "5m"       and volume5m > avgVolume5m)
+       or (useVolumeFilter == "Current"  and volume > avgVolumeCurrent)
+       or (useVolumeFilter == "All")
+     )
+
+finalLongCondition  = longCondition  and longVolume
+finalShortCondition = shortCondition and shortVolume
+
+//── 8) Stop-loss levels
+longStopLoss  = close * (1 - stopLossPercent / 100)
+shortStopLoss = close * (1 + stopLossPercent / 100)
+
+//── 9) Only place new trades if inside the last X days
+if inLookbackWin
+    // Long entries
+    if finalLongCondition
+        // Close existing short positions
+        strategy.close("Short Entry", comment="Close Short on Long Signal")
+        // Enter new long
+        strategy.entry("Long Entry", strategy.long)
+        // Standard exit with stop-loss & trailing stop
+        strategy.exit("Close Long", "Long Entry", stop         = longStopLoss, trail_points = trailingStop / 100 * close, trail_offset = trailingStop / 100 * close)
+    
+    // Short entries
+    if finalShortCondition
+        // Close existing long positions
+        strategy.close("Long Entry", comment="Close Long on Short Signal")
+        // Enter new short
+        strategy.entry("Short Entry", strategy.short)
+        // Standard exit with stop-loss & trailing stop
+        strategy.exit("Close Short", "Short Entry", stop         = shortStopLoss, trail_points = trailingStop / 100 * close, trail_offset = trailingStop / 100 * close)

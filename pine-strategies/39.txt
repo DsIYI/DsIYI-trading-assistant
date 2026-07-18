@@ -1,0 +1,136 @@
+//@version=5
+strategy('Candlestick Trend Strategy v0.5 by JustUncleL - No Repaint', overlay=true)
+
+// Indicator Inputs (tuned for MYX vol)
+matype   = input.string(defval='HullMA', title='Fast MA Type', options=['SMA', 'EMA', 'WMA', 'VWMA', 'SMMA', 'DEMA', 'TEMA', 'HullMA', 'TMA', 'ZEMA'])
+malength = input.int(defval=14, title='Moving Average Length', minval=1)  // OPT: 14 for MYX responsiveness
+src      = input.source(close, title='Moving Average Source')  // FIXED: Plain close
+
+// NEW: Filters to Cut Bad Trades
+useVolFilter = input.bool(true, title="Volume Filter (Vol > 1.5x Avg)?")  // NEW: Skip chop
+useTrendFilter = input.bool(true, title="Trend Filter (ADX > 20)?")  // NEW: Momentum gate
+adxLen = input.int(14, title="ADX Length")
+minAdx = input.float(20, title="Min ADX")  // OPT: 20 for MYX
+signalCooldown = input.int(2, title="Cooldown Bars Between Signals", minval=1)  // NEW: Anti-whipsaw
+var int lastSignalBar = na
+
+// FIXED: Cooldown calc (moved up before signals)
+cooldownPassed = na(lastSignalBar) or bar_index - lastSignalBar > signalCooldown
+
+// Backtesting Time Settings (live-friendly)
+fromMonth = input.int(1, title='From Month', minval=1, maxval=12)
+fromDay = input.int(1, title='From Day', minval=1, maxval=31)
+fromYear = input.int(2020, title='From Year', minval=2000)
+toMonth = input.int(12, title='To Month', minval=1, maxval=12)  // FIXED: Current for live
+toDay = input.int(31, title='To Day', minval=1, maxval=31)
+toYear = input.int(2025, title='To Year', minval=2000)
+startTime = timestamp(fromYear, fromMonth, fromDay, 00, 00)
+endTime = timestamp(toYear, toMonth, toDay, 23, 59)
+tradeWindow = time >= startTime and time <= endTime
+
+// Stop-Loss & Trailing Take-Profit Inputs (tuned for MYX)
+stopLossATR = input.float(1.0, title='ATR Multiplier for SL', minval=0.5, step=0.1)  // NEW: Dynamic SL
+trailingTPPercent = input.float(2.5, title='Trailing Take-Profit %', minval=0.1) / 100  // OPT: Tighter for MYX
+breakevenTrigger = input.float(0.5, title="Breakeven % Before Trail", minval=0.1) / 100  // NEW: Guard
+
+// Candlestick Pattern Inputs (selective for less noise)
+useBullishEngulfing = input.bool(title='Use Bullish Engulfing', defval=true)
+useBearishEngulfing = input.bool(title='Use Bearish Engulfing', defval=true)
+useBullishPinBar = input.bool(title='Use Bullish Pin Bar', defval=true)
+useBearishPinBar = input.bool(title='Use Bearish Pin Bar', defval=true)
+usePiercingLine = input.bool(title='Use Piercing Line', defval=false)  // OPT: OFF for MYX (noisy)
+useDarkCloudCover = input.bool(title='Use Dark Cloud Cover', defval=false)  // OPT: OFF for MYX
+
+// NEW: Filters
+atrValue = ta.atr(14)
+volFilter = not useVolFilter or volume[1] > ta.sma(volume[1], 20) * 1.5  // FIXED: [1] for confirmed
+[diplus, diminus, adxValue] = ta.dmi(adxLen, adxLen)
+trendFilter = not useTrendFilter or adxValue[1] > minAdx  // FIXED: [1] for confirmed
+
+// Moving Average Selection
+variant(type, src, len) =>
+    v1 = ta.sma(src, len)
+    v2 = ta.ema(src, len)
+    v3 = ta.wma(src, len)
+    v4 = ta.vwma(src, len)
+    v5 = ta.sma(src, len)
+    v6 = 2 * v2 - ta.ema(v2, len)
+    v7 = 3 * (v2 - ta.ema(v2, len)) + ta.ema(ta.ema(v2, len), len)
+    v8 = ta.wma(2 * ta.wma(src, len / 2) - ta.wma(src, len), math.round(math.sqrt(len)))
+    ema1 = ta.ema(src, len)
+    ema2 = ta.ema(ema1, len)
+    v10 = ema1 + (ema1 - ema2)
+    v11 = ta.sma(ta.sma(src, len), len)
+    type == 'EMA' ? v2 : type == 'WMA' ? v3 : type == 'VWMA' ? v4 : type == 'SMMA' ? v5 : type == 'DEMA' ? v6 : type == 'TEMA' ? v7 : type == 'HullMA' ? v8 : type == 'ZEMA' ? v10 : type == 'TMA' ? v11 : v1
+
+zlema = variant(matype, src[1], malength)  // FIXED: [1] for confirmed source
+col = zlema > zlema[1] ? color.green : color.red
+plot(zlema, color=col, linewidth=2)
+
+// Candlestick Pattern Recognition (gated by filters, confirmed bars—FULL HISTORICAL)
+bullishEngulfing = useBullishEngulfing and close[2] < open[2] and close[1] > open[1] and close[1] >= high[2] and open[1] <= close[2]  // FIXED: [1]/[2] confirmed
+bearishEngulfing = useBearishEngulfing and close[2] > open[2] and close[1] < open[1] and close[1] <= low[2] and open[1] >= close[2]  // FIXED: [1]/[2] confirmed
+
+bullishPinBar = useBullishPinBar and (close[2] > open[2] and close[2] > high[2] - (high[2] - low[2]) * 0.66 and low[2] < low[3])  // FIXED: [2]/[3] confirmed
+bearishPinBar = useBearishPinBar and (close[2] < open[2] and close[2] < low[2] + (high[2] - low[2]) * 0.66 and high[2] > high[3])  // FIXED: [2]/[3] confirmed
+
+piercingLine = usePiercingLine and close[3] < open[3] and close[2] > open[2] and close[2] > (open[3] + close[3]) / 2  // FIXED: [2]/[3] confirmed
+
+darkCloudCover = useDarkCloudCover and close[3] > open[3] and close[2] < open[2] and close[2] < (open[3] + close[3]) / 2  // FIXED: [2]/[3] confirmed
+
+// FIXED: Signals on confirmed bar ONLY (no current bar data)
+bullishSignal = barstate.isconfirmed and (bullishEngulfing or bullishPinBar or piercingLine) and volFilter and trendFilter and tradeWindow and cooldownPassed
+bearishSignal = barstate.isconfirmed and (bearishEngulfing or bearishPinBar or darkCloudCover) and volFilter and trendFilter and tradeWindow and cooldownPassed
+
+// Cooldown update
+if bullishSignal or bearishSignal
+    lastSignalBar := bar_index
+
+// Track entry for dynamic SL/trail
+var float longEntry = na
+var float shortEntry = na
+
+// NEW: Next-bar close flag (delays closes to avoid same-time)
+var bool pendingCloseLong = false
+var bool pendingCloseShort = false
+
+// Trade Execution (gated closes, delayed to next bar)
+if bullishSignal
+    pendingCloseShort := strategy.position_size < 0  // Flag for next bar
+    strategy.entry('BUY', strategy.long)
+    longEntry := close  // FIXED: Hold for SL/trail
+    lastSignalBar := bar_index
+
+if bearishSignal
+    pendingCloseLong := strategy.position_size > 0  // Flag for next bar
+    strategy.entry('SELL', strategy.short)
+    shortEntry := close  // FIXED: Hold for SL/trail
+    lastSignalBar := bar_index
+
+// FIXED: Delayed closes (next bar only)
+if pendingCloseLong and barstate.isconfirmed
+    strategy.close('BUY', comment="Close Long on Bearish (Delayed)")
+    pendingCloseLong := false
+if pendingCloseShort and barstate.isconfirmed
+    strategy.close('SELL', comment="Close Short on Bullish (Delayed)")
+    pendingCloseShort := false
+
+// ENHANCED: Dynamic ATR SL + Trailing (from entry, after breakeven)
+longBreakeven = strategy.position_size > 0 and (close - longEntry) / longEntry >= breakevenTrigger
+shortBreakeven = strategy.position_size < 0 and (shortEntry - close) / shortEntry >= breakevenTrigger
+
+if strategy.position_size > 0
+    dynamicSL_long = longEntry - (atrValue * stopLossATR)  // NEW: ATR-based
+    trailStopLong = longBreakeven ? math.max(dynamicSL_long, high * (1 - trailingTPPercent)) : dynamicSL_long  // Trail after breakeven
+    strategy.exit('Exit Long', 'BUY', stop=dynamicSL_long, trail_price=trailStopLong, trail_offset=trailingTPPercent * close)
+
+if strategy.position_size < 0
+    dynamicSL_short = shortEntry + (atrValue * stopLossATR)  // NEW: ATR-based
+    trailStopShort = shortBreakeven ? math.min(dynamicSL_short, low * (1 + trailingTPPercent)) : dynamicSL_short  // Trail after breakeven
+    strategy.exit('Exit Short', 'SELL', stop=dynamicSL_short, trail_price=trailStopShort, trail_offset=trailingTPPercent * close)
+
+// FIXED: No opposite-candle exits (too loose—replaced with trail/SL)
+
+// Visualization
+plotshape(series=bullishSignal, location=location.belowbar, color=color.green, style=shape.labelup, title='Bullish Signal')
+plotshape(series=bearishSignal, location=location.abovebar, color=color.red, style=shape.labeldown, title='Bearish Signal')

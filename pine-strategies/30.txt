@@ -1,0 +1,49 @@
+//@version=5
+strategy("Directional Change LRBB Power Strategy with RSI Filter", shorttitle="DCLRBBS-RSI", overlay=true)
+
+// Customization Inputs for LRBB Power
+window = input.int(10, title="Lookback Window", minval=1, maxval=100)
+smooth = input.bool(true, title="Smooth?")
+smap = input.int(5, title="Smooth Factor", minval=2, maxval=10)
+sigma = input.float(6, title="Sigma", minval=0.1, maxval=100)
+stopLossPct = input.float(1.5, title="Stop Loss (%)", minval=0.01, maxval=100.0)
+stopLossFixed = input.float(0.0, title="Stop Loss (Fixed, 0 to disable)", minval=0)
+
+// Inputs for RSI Filter
+rsiLength = input.int(14, title="RSI Length", group="RSI Filter")
+upperThreshold = input.float(70, title="Upper Threshold", minval=50, maxval=100, group="RSI Filter") // Overbought level
+lowerThreshold = input.float(30, title="Lower Threshold", minval=0, maxval=50, group="RSI Filter") // Oversold level
+
+// RSI Calculation
+rsi = ta.rsi(close, rsiLength)
+
+// LRBB Power Calculations
+f_exp_lr(_height, _length) => _height + _height / _length
+h_value = ta.highest(close, window)
+l_value = ta.lowest(close, window)
+h_bar = bar_index - ta.highestbars(close, window)
+l_bar = bar_index - ta.lowestbars(close, window)
+bear = 0 - (f_exp_lr(h_value - close, h_bar) > 0 ? f_exp_lr(h_value - close, h_bar) : 0)
+bull = 0 + (f_exp_lr(close - l_value, l_bar) > 0 ? f_exp_lr(close - l_value, l_bar) : 0)
+direction = smooth ? ta.alma(bull + bear, smap, 0.85, sigma) : bull + bear
+
+// Detecting direction changes for trade signals
+directionDelta = direction - direction[1]
+directionDeltaPrev = direction[1] - direction[2]
+longSignal = directionDelta > 0 and directionDeltaPrev <= 0 and rsi < lowerThreshold
+shortSignal = directionDelta < 0 and directionDeltaPrev >= 0 and rsi > upperThreshold
+
+// Implementing Strategy Entries and Exits based on combined LRBB Power and RSI Filter
+if (longSignal)
+    strategy.entry("Long", strategy.long)
+    if (stopLossFixed > 0)
+        strategy.exit("Stop Loss Long", "Long", loss=stopLossFixed)
+    else
+        strategy.exit("Stop Loss Long", "Long", stop=close * (1 - stopLossPct / 100))
+
+if (shortSignal)
+    strategy.entry("Short", strategy.short)
+    if (stopLossFixed > 0)
+        strategy.exit("Stop Loss Short", "Short", loss=stopLossFixed)
+    else
+        strategy.exit("Stop Loss Short", "Short", stop=close * (1 + stopLossPct / 100))

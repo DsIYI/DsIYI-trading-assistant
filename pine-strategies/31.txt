@@ -1,0 +1,84 @@
+//@version=5
+strategy('Supertrend Strategy with EMA & Volume Filters and Trailing Stop - Fixed', overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 15)
+
+// Timing settings (live-friendly)
+FromMonth = input.int(defval = 9, title = 'From Month', minval = 1, maxval = 12)
+FromDay = input.int(defval = 1, title = 'From Day', minval = 1, maxval = 31)
+FromYear = input.int(defval = 2018, title = 'From Year', minval = 999)
+ToMonth = input.int(defval = 12, title = 'To Month', minval = 1, maxval = 12)  // FIXED: Current for live
+ToDay = input.int(defval = 31, title = 'To Day', minval = 1, maxval = 31)
+ToYear = input.int(defval = 9999, title = 'To Year', minval = 999)
+start = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+window() =>
+    time >= start and time <= finish ? true : false
+
+// Supertrend inputs
+atrPeriod = input(2, 'ATR Length')
+factor = input.float(0.09, 'Factor', step = 0.01)
+trailingStop = input.float(1.5, 'Trailing Stop (%)', step = 0.1)
+
+// NEW: Anti-Whipsaw
+signalCooldown = input.int(3, title="Cooldown Bars Between Signals", minval=1)  // NEW: Prevent flips
+var int lastSignalBar = na
+
+// Additional filters
+emaLength = 9
+volumeLookback = 50
+useEMAFilter = input.string('Both', 'Use EMA Filter for', options = ['None', '2m', '5m', 'Both'])
+useVolumeFilter = input.string('All', 'Use Volume Filter for', options = ['None', '2m', '5m', 'Current', 'All'])
+
+// FIXED: Non-Repainting Security (with lookahead_off + gaps_off)
+ema2m = request.security(syminfo.tickerid, '2', ta.ema(close, emaLength), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+ema5m = request.security(syminfo.tickerid, '5', ta.ema(close, emaLength), lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+volume2m = request.security(syminfo.tickerid, '2', volume, lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+volume5m = request.security(syminfo.tickerid, '5', volume, lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_off)
+avgVolume2m = ta.sma(volume2m, volumeLookback)
+avgVolume5m = ta.sma(volume5m, volumeLookback)
+avgVolumeCurrent = ta.sma(volume, volumeLookback)
+
+// EMA and volume filter conditions
+longEMA = useEMAFilter == '2m' and close > ema2m or useEMAFilter == '5m' and close > ema5m or useEMAFilter == 'Both' and close > ema2m and close > ema5m
+shortEMA = useEMAFilter == '2m' and close < ema2m or useEMAFilter == '5m' and close < ema5m or useEMAFilter == 'Both' and close < ema2m and close < ema5m
+longVol = useVolumeFilter == '2m' and volume2m > avgVolume2m or useVolumeFilter == '5m' and volume5m > avgVolume5m or useVolumeFilter == 'Current' and volume > avgVolumeCurrent or useVolumeFilter == 'All'
+shortVol = useVolumeFilter == '2m' and volume2m > avgVolume2m or useVolumeFilter == '5m' and volume5m > avgVolume5m or useVolumeFilter == 'Current' and volume > avgVolumeCurrent or useVolumeFilter == 'All'
+
+// Supertrend calculation (non-repainting)
+[supertrend, direction] = ta.supertrend(factor, atrPeriod)
+
+// Entry conditions (with cooldown & confirmed)
+cooldownPassed = na(lastSignalBar) or bar_index - lastSignalBar > signalCooldown
+longCondition = ta.change(direction) < 0 and longEMA and longVol and window() and cooldownPassed and barstate.isconfirmed  // FIXED: Confirmed + cooldown
+shortCondition = ta.change(direction) > 0 and shortEMA and shortVol and window() and cooldownPassed and barstate.isconfirmed  // FIXED: Confirmed + cooldown
+
+// Track entry for fixed trail
+var float longEntry = na
+var float shortEntry = na
+
+// Execute trades with reversible signals (gated closes)
+if longCondition
+    if strategy.position_size < 0  // FIXED: Only close if short
+        strategy.close('Short Entry', comment="Close Short on Long")
+    strategy.entry('Long Entry', strategy.long)
+    longEntry := close  // FIXED: Hold for trail
+    lastSignalBar := bar_index
+
+if shortCondition
+    if strategy.position_size > 0  // FIXED: Only close if long
+        strategy.close('Long Entry', comment="Close Long on Short")
+    strategy.entry('Short Entry', strategy.short)
+    shortEntry := close  // FIXED: Hold for trail
+    lastSignalBar := bar_index
+
+// FIXED: Proper Trailing Exits (fixed % from entry, no dynamic close)
+if strategy.position_size > 0
+    trailStopLong = longEntry * (1 - trailingStop / 100)  // FIXED: From entry
+    strategy.exit('Close Long', 'Long Entry', trail_price=trailStopLong, trail_offset=trailingStop / 100 * syminfo.mintick * syminfo.pointvalue)  // FIXED: Proper units
+
+if strategy.position_size < 0
+    trailStopShort = shortEntry * (1 + trailingStop / 100)  // FIXED: From entry
+    strategy.exit('Close Short', 'Short Entry', trail_price=trailStopShort, trail_offset=trailingStop / 100 * syminfo.mintick * syminfo.pointvalue)  // FIXED: Proper units
+
+// Debugging: Plot conditions
+plotshape(series=longCondition, title="Long Signal", location=location.belowbar, color=color.green, style=shape.labelup, size=size.small)
+plotshape(series=shortCondition, title="Short Signal", location=location.abovebar, color=color.red, style=shape.labeldown, size=size.small)

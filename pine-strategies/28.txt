@@ -1,0 +1,48 @@
+//@version=6
+strategy('Supertrend TP+SL Mode [XRPUSD.P Bybit]', overlay = true, margin_long = 100, margin_short = 100, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+// === Inputs ===
+atrPeriod = input.int(1, 'ATR Period')
+multiplier = input.float(1.3, 'ATR Multiplier', step = 0.1)
+src = input.source(ohlc4, 'Source')
+tpPercent = input.float(1.0, 'Take Profit %', step = 0.1)
+slPercent = input.float(0.5, 'Stop Loss %', step = 0.1)
+
+// Backtest range
+fromYear = input.int(2023, 'From Year')
+fromMonth = input.int(1, 'From Month', minval = 1, maxval = 12)
+fromDay = input.int(1, 'From Day', minval = 1, maxval = 31)
+toYear = input.int(2025, 'To Year')
+toMonth = input.int(12, 'To Month', minval = 1, maxval = 12)
+toDay = input.int(31, 'To Day', minval = 1, maxval = 31)
+
+start = timestamp(fromYear, fromMonth, fromDay, 0, 0)
+finish = timestamp(toYear, toMonth, toDay, 23, 59)
+inTrade = time >= start and time <= finish
+
+// === ATR Bands ===
+atr = ta.atr(atrPeriod)
+upperBand = src - multiplier * atr
+lowerBand = src + multiplier * atr
+
+var float trend = na
+trend := na(trend[1]) ? 1 : trend[1]
+trend := trend == -1 and close > lowerBand[1] ? 1 : trend == 1 and close < upperBand[1] ? -1 : trend
+
+buySignal = inTrade and trend == 1 and trend[1] == -1
+sellSignal = inTrade and trend == -1 and trend[1] == 1
+
+// === Strategy Logic with TP & SL ===
+if buySignal
+    strategy.entry('Long', strategy.long)
+    strategy.exit('Exit Long', 'Long', profit = tpPercent * 0.01 * close, loss = slPercent * 0.01 * close)
+    alert('{ "side": "buy", "symbol": "XRPUSD.P", "leverage": 2, "tp": ' + str.tostring(tpPercent) + ', "sl": ' + str.tostring(slPercent) + ', "strategy": "supertrend_tp_sl" }', alert.freq_once_per_bar)
+
+if sellSignal
+    strategy.entry('Short', strategy.short)
+    strategy.exit('Exit Short', 'Short', profit = tpPercent * 0.01 * close, loss = slPercent * 0.01 * close)
+    alert('{ "side": "sell", "symbol": "XRPUSD.P", "leverage": 2, "tp": ' + str.tostring(tpPercent) + ', "sl": ' + str.tostring(slPercent) + ', "strategy": "supertrend_tp_sl" }', alert.freq_once_per_bar)
+
+// Plot bands
+plot(trend == 1 ? upperBand : na, 'UpTrend', color = color.green)
+plot(trend == -1 ? lowerBand : na, 'DownTrend', color = color.red)

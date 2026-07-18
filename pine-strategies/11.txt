@@ -1,0 +1,48 @@
+//@version=5
+strategy("+1Enhanced BB Strategy with Multi-TF EMA & Volume", overlay=true)
+
+// Define input parameters
+length = input.int(20, "SMA Length")
+mult = input.float(2.0, "Standard Deviation Multiplier")
+trailingPercent = input.float(1.5, "Trailing Stop (%)")
+pyramidMax = input.int(2, "Max Pyramid Orders")
+percentPerOrder = input.float(10, "Percent of Equity per Order")
+useEMAFilter = input.string("Both", "Use EMA Filter for", options=["None", "2m", "5m", "Both"])
+useVolumeFilter = input.string("All", "Use Volume Filter for", options=["None", "2m", "5m", "Current", "All"])
+emaLength = 9
+volumeLookback = 50 // Lookback period for average volume calculation
+
+// Fetch EMA from different timeframes
+ema2m = request.security(syminfo.tickerid, "2", ta.ema(close, emaLength))
+ema5m = request.security(syminfo.tickerid, "5", ta.ema(close, emaLength))
+
+// Fetch volume from different timeframes and calculate the average volume
+volume2m = request.security(syminfo.tickerid, "2", volume)
+volume5m = request.security(syminfo.tickerid, "5", volume)
+avgVolume2m = ta.sma(volume2m, volumeLookback)
+avgVolume5m = ta.sma(volume5m, volumeLookback)
+avgVolumeCurrent = ta.sma(volume, volumeLookback)
+
+// Bollinger Bands calculation
+basis = ta.sma(close, length)
+dev = mult * ta.stdev(close, length)
+upper = basis + dev
+lower = basis - dev
+
+// Entry conditions based on EMA and volume filters
+longCondition = close > lower and ((useEMAFilter == "2m" and close > ema2m) or (useEMAFilter == "5m" and close > ema5m) or (useEMAFilter == "Both" and close > ema2m and close > ema5m))
+shortCondition = close < upper and ((useEMAFilter == "2m" and close < ema2m) or (useEMAFilter == "5m" and close < ema5m) or (useEMAFilter == "Both" and close < ema2m and close < ema5m))
+longVolume = volume > avgVolumeCurrent and ((useVolumeFilter == "2m" and volume2m > avgVolume2m) or (useVolumeFilter == "5m" and volume5m > avgVolume5m) or (useVolumeFilter == "All"))
+shortVolume = volume > avgVolumeCurrent and ((useVolumeFilter == "2m" and volume2m > avgVolume2m) or (useVolumeFilter == "5m" and volume5m > avgVolume5m) or (useVolumeFilter == "All"))
+
+// Combine conditions for final entry signals
+finalLongCondition = longCondition and longVolume
+finalShortCondition = shortCondition and shortVolume
+
+// Execute trades
+if (finalLongCondition)
+    strategy.entry("Long Entry", strategy.long)
+if (finalShortCondition)
+    strategy.entry("Short Entry", strategy.short)
+
+// Optional: Add exit logic here

@@ -1,0 +1,53 @@
+//@version=5
+strategy("Enhanced Bollinger Bands with Backtesting Range", overlay=true)
+
+// Backtesting Inputs
+barType = input.string(defval = "Time", options = ["Time", "Bars Back"], title = "Identify Bars Tested Using: ")
+start = input.time(defval = timestamp("2022-05-02"), title = "Test Start Date")
+end = input.time(defval = timestamp("2023-01-02"), title = "Test End Date")
+barsBack = input.int(defval = 0, title = "Bars Back", minval = 0, step = 50)
+dataDisplay = input.string(defval = "Table and Label", title = "Display Bars Tested: ", options = ["Label", "Table", "Table and Label"])
+
+// Trading Strategy Inputs
+length = input.int(20, minval=1)
+mult = input.float(2.0, minval=0.001, maxval=50)
+trailingPercent = input.float(1.5, title="Trailing Stop (%)")
+pyramidMax = input.int(2, title="Max Pyramid Orders")
+percentPerOrder = input.float(10, title="Percent of Equity per Order")
+
+// Initialize arrays for tracking bar indices
+var int[] barTrack = array.new_int(2, na)
+
+// Create a table for displaying information
+var table myTable = table.new(position.top_right, 2, 1)
+
+basis = ta.sma(close, length)
+dev = mult * ta.stdev(close, length)
+upper = basis + dev
+lower = basis - dev
+
+// Condition to check if the current bar is within the user-defined backtesting range
+inDateRange = barType == "Time" ? (time >= start and time <= end) : (bar_index >= last_bar_index - barsBack)
+
+// Trade Entry Conditions
+longCondition = ta.crossover(close, lower) and inDateRange
+shortCondition = ta.crossunder(close, upper) and inDateRange
+
+if (longCondition)
+    strategy.entry("BBandLE", strategy.long, stop=lower)
+    strategy.exit("ExitLong", "BBandLE", trail_price=close * (1 - trailingPercent / 100), trail_offset=close * (trailingPercent / 100))
+
+if (shortCondition)
+    strategy.entry("BBandSE", strategy.short, stop=upper)
+    strategy.exit("ExitShort", "BBandSE", trail_price=close * (1 + trailingPercent / 100), trail_offset=close * (trailingPercent / 100))
+
+// Background color for the testing period
+bgcolor(inDateRange ? color.new(color.green, 90) : na)
+
+// Display logic for the testing range
+if bar_index == array.get(barTrack, 1)  // Check if we're at the last recorded bar for display purposes
+    if dataDisplay != "Table"
+        label.new(bar_index, high, text="Testing from " + str.tostring(start) + " to " + str.tostring(end), style=label.style_label_down, color=color.new(color.blue, 90))
+
+    if dataDisplay != "Label"
+        table.cell(myTable, 0, 0, "Testing Bars: " + str.tostring(bar_index - array.get(barTrack, 0)))

@@ -1,0 +1,71 @@
+//@version=6
+strategy('Bollinger Bands Strategy with alerts (incl. pending orders) via TradingConnector to Forex', overlay = true, default_qty_value = 1000)
+
+// === BACKTEST RANGE ===
+FromMonth = input.int(1, "From Month", minval=1, maxval=12)
+FromDay = input.int(1, "From Day", minval=1, maxval=31)
+FromYear = input.int(2025, "From Year", minval=2025)
+ToMonth = input.int(12, "To Month", minval=1, maxval=12)
+ToDay = input.int(31, "To Day", minval=1, maxval=31)
+ToYear = input.int(2999, "To Year", minval=2025)
+start = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+in_window = time >= start and time <= finish
+
+source = close
+length = input.int(20, minval = 1)
+mult = input.float(2.0, minval = 0.001, maxval = 50)
+basis = ta.sma(source, length)
+dev = mult * ta.stdev(source, length)
+upper = basis + dev
+lower = basis - dev
+buyEntry = ta.crossover(source, lower)
+sellEntry = ta.crossunder(source, upper)
+if ta.crossover(source, lower)
+    strategy.entry('BBandLE', strategy.long, stop = lower, oca_name = 'BollingerBands', oca_type = strategy.oca.cancel, comment = 'BBandLE')
+    alert(message = 'long price=' + str.tostring(lower), freq = alert.freq_once_per_bar_close)
+else
+    strategy.cancel(id = 'BBandLE')
+    alert(message = 'cancel long', freq = alert.freq_once_per_bar_close)
+if ta.crossunder(source, upper)
+    strategy.entry('BBandSE', strategy.short, stop = upper, oca_name = 'BollingerBands', oca_type = strategy.oca.cancel, comment = 'BBandSE')
+    alert(message = 'short price=' + str.tostring(upper), freq = alert.freq_once_per_bar_close)
+else
+    strategy.cancel(id = 'BBandSE')
+    alert(message = 'cancel short', freq = alert.freq_once_per_bar_close)
+
+//("TrailingTakeProfit example", overlay=true, margin_long=100, margin_short=100, default_qty_value = 1, initial_capital = 100)
+
+longCondition = ta.crossover(ta.sma(close, 14), ta.sma(close, 28))
+shortCondition = ta.crossunder(ta.sma(close, 14), ta.sma(close, 28))
+
+if longCondition
+    strategy.entry('Long', strategy.long, comment = 'long', alert_message = 'long')
+if shortCondition
+    strategy.entry('Short', strategy.short, comment = 'short', alert_message = 'short')
+
+atr_length = input.int(7, title = 'ATR Length')
+atr_multiplier = input.float(1.5, title = 'ATR Multiplier')
+atr_multiplied = atr_multiplier * ta.atr(atr_length)
+ttp_top_bracket = strategy.position_size > 0 ? high[1] + atr_multiplied : na
+ttp_bottom_bracket = strategy.position_size < 0 ? low[1] - atr_multiplied : na
+
+plot(ttp_top_bracket, title = 'ttp_top_bracket', color = color.lime, style = plot.style_linebr, offset = 1)
+plot(ttp_bottom_bracket, title = 'ttp_bottom_bracket', color = color.red, style = plot.style_linebr, offset = 1)
+
+strategy.exit('closelong', from_entry = 'Long', limit = ttp_top_bracket, alert_message = 'closelong')
+strategy.exit('closeshort', from_entry = 'Short', limit = ttp_bottom_bracket, alert_message = 'closeshort')
+
+var table alertsDisplayTable = table.new(position.top_right, 1, 5, color.black)
+if barstate.islastconfirmedhistory
+    table.cell(alertsDisplayTable, 0, 0, 'TradingConnector-compatible alerts sent', text_color = color.white)
+    table.cell(alertsDisplayTable, 0, 1, 'at Long Entry: long', text_color = color.white)
+    table.cell(alertsDisplayTable, 0, 2, 'at Short Entry: short', text_color = color.white)
+    table.cell(alertsDisplayTable, 0, 3, 'at Long Exit: closelong', text_color = color.white)
+    table.cell(alertsDisplayTable, 0, 4, 'at Short Exit: closeshort', text_color = color.white)
+
+//plot(strategy.equity, title="equity", color=color.red, linewidth=2, style=plot.style_areabr)
+
+//Lines of code added to the original built-in script: 14, 17, 20 and 23 only.
+//They trigger alerts ready to be executed on real markets through TradingConnector
+//available for Forex, indices, crypto, stocks - anything your broker offers for trading via MetaTrader4/5

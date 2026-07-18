@@ -1,0 +1,280 @@
+//@version=5
+strategy("Improved Pivot Point Strategy with EMA & Volume Filters, Reversal, and Trailing Stop - Live Trading Considerations", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=15, max_bars_back=4999)
+
+// Timing settings
+FromMonth = input.int(defval=10, title='From Month', minval=1, maxval=12)
+FromDay = input.int(defval=1, title='From Day', minval=1, maxval=31)
+FromYear = input.int(defval=2024, title='From Year', minval=2024)
+ToMonth = input.int(defval=1, title='To Month', minval=1, maxval=12)
+ToDay = input.int(defval=1, title='To Day', minval=1, maxval=31)
+ToYear = input.int(defval=9999, title='To Year', minval=2024)
+start = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+window() =>
+    time >= start and time <= finish
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🛡️ ПРИОРИТЕТНИ ANTI-SCALP ФИЛТРИ
+// ═══════════════════════════════════════════════════════════════════════════════
+minBarsInPosition = input.int(defval=5, title="⏱️ Minimum Bars in Position", minval=1, maxval=100, 
+     tooltip="Позицията НЕ МОЖЕ да се затвори преди този брой барове.")
+
+minProfitToClose = input.float(defval=0.3, title="💰 Min Profit % to Close", minval=0.0, maxval=10.0, step=0.1,
+     tooltip="Позицията се затваря САМО при тази минимална печалба.")
+
+// Pivot Point settings
+pivotPeriod = input.int(defval=5, title="Pivot Period", minval=1, maxval=50)
+candleWait = input.int(defval=1, title="Candle Wait Period", options=[1, 2, 3, 5])
+
+// EMA and Volume Filter settings
+emaLength = input.int(9, title="EMA Length")
+volumeLookback = input.int(50, title="Volume Lookback Period")
+
+// EMA and Volume calculation
+emaValue = ta.ema(close, emaLength)
+avgVolume = ta.sma(volume, volumeLookback)
+
+// Pivot Point calculations
+pivotHigh = ta.pivothigh(high, pivotPeriod, pivotPeriod)
+pivotLow = ta.pivotlow(low, pivotPeriod, pivotPeriod)
+
+// Plot Pivot Points
+plotshape(series=pivotHigh, location=location.abovebar, color=color.red, style=shape.labeldown, title="Pivot High")
+plotshape(series=pivotLow, location=location.belowbar, color=color.green, style=shape.labelup, title="Pivot Low")
+
+// Check if Pivot Points have stayed for the specified candleWait period
+var float lastPivotHigh = na
+var float lastPivotLow = na
+var int barsSincePivotHigh = na
+var int barsSincePivotLow = na
+
+if (not na(pivotHigh))
+    lastPivotHigh := high[pivotPeriod]
+    barsSincePivotHigh := 0
+else
+    barsSincePivotHigh := na(barsSincePivotHigh) ? na : barsSincePivotHigh + 1
+
+if (not na(pivotLow))
+    lastPivotLow := low[pivotPeriod]
+    barsSincePivotLow := 0
+else
+    barsSincePivotLow := na(barsSincePivotLow) ? na : barsSincePivotLow + 1
+
+pivotHighCondition = not na(barsSincePivotHigh) and barsSincePivotHigh == candleWait
+pivotLowCondition = not na(barsSincePivotLow) and barsSincePivotLow == candleWait
+
+// Entry conditions based on Pivot Points, EMA, and volume
+longConditionPivot = pivotLowCondition and window()
+shortConditionPivot = pivotHighCondition and window()
+
+longConditionEMA = (close > emaValue) and (volume > avgVolume) and window()
+shortConditionEMA = (close < emaValue) and (volume > avgVolume) and window()
+
+// Manual inputs for enabling/disabling conditions
+useLongConditionPivot = input.bool(true, title="Use Long Condition (Pivot)")
+useShortConditionPivot = input.bool(true, title="Use Short Condition (Pivot)")
+useLongConditionEMA = input.bool(true, title="Use Long Condition (EMA)")
+useShortConditionEMA = input.bool(true, title="Use Short Condition (EMA)")
+
+// Slippage and Spread consideration
+slippage = input.float(defval=0.1, title="Slippage (%)")
+spread = input.float(defval=0.1, title="Spread (%)")
+
+// Stop-Loss and Trailing Stop settings
+stopLossPercent = input.float(1.0, "Stop-Loss (%)", minval=0.1, maxval=10.0) + slippage + spread
+trailingStop = input.float(1.5, "Trailing Stop (%)", step=0.1) + slippage + spread
+
+// Hull Moving Average (HMA) settings
+src = input(close, title="Source")
+modeSwitch = input.string("Hma", title="Hull Variation", options=["Hma", "Thma", "Ehma"])
+length = input.int(55, title="Length (180-200 for floating S/R, 55 for swing entry)")
+lengthMult = input.float(1.0, title="Length multiplier (Used to view higher timeframes with straight band)")
+
+switchColor = input.bool(true, "Color Hull according to trend?")
+candleCol = input.bool(false, title="Color candles based on Hull's Trend?")
+visualSwitch = input.bool(true, title="Show as a Band?")
+thicknesSwitch = input.int(1, title="Line Thickness")
+transpSwitch = input.int(40, title="Band Transparency", step=5)
+
+// Hull Moving Average (HMA) calculations
+HMA(_src, _length) =>
+    ta.wma(2 * ta.wma(_src, _length / 2) - ta.wma(_src, _length), math.round(math.sqrt(_length)))
+
+EHMA(_src, _length) =>
+    ta.ema(2 * ta.ema(_src, _length / 2) - ta.ema(_src, _length), math.round(math.sqrt(_length)))
+
+THMA(_src, _length) =>
+    ta.wma(ta.wma(_src, _length / 3) * 3 - ta.wma(_src, _length / 2) - ta.wma(_src, _length), _length)
+
+Mode(modeSwitch, src, len) =>
+    var float result = na
+    if modeSwitch == "Hma"
+        result := HMA(src, len)
+    else if modeSwitch == "Ehma"
+        result := EHMA(src, len)
+    else if modeSwitch == "Thma"
+        result := THMA(src, len / 2)
+    result
+
+_hull = Mode(modeSwitch, src, int(length * lengthMult))
+HULL = _hull
+MHULL = HULL[0]
+SHULL = HULL[2]
+
+hullColor = switchColor ? (HULL > HULL[2] ? color.green : color.red) : color.new(color.orange, 0)
+
+Fi1 = plot(MHULL, title="MHULL", color=hullColor, linewidth=thicknesSwitch, transp=50)
+Fi2 = plot(visualSwitch ? SHULL : na, title="SHULL", color=hullColor, linewidth=thicknesSwitch, transp=50)
+fill(Fi1, Fi2, title="Band Filler", color=hullColor, transp=transpSwitch)
+barcolor(color = candleCol ? (switchColor ? hullColor : na) : na)
+
+// Hull MA trend conditions
+longTrendCondition = HULL > HULL[2]
+shortTrendCondition = HULL < HULL[2]
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ПРОМЕНЛИВИ ЗА СЛЕДЕНЕ НА ПОЗИЦИЯТА (за Anti-Scalp филтри)
+// ═══════════════════════════════════════════════════════════════════════════════
+var int positionState = 0              // 0 = flat, 1 = long, -1 = short
+var int barsHeld = 0                   // брой барове в текущата позиция
+var float entryPrice = 0.0             // цена на вход
+var float highestSinceEntry = 0.0      // за trailing stop
+var float lowestSinceEntry = 0.0       // за trailing stop
+
+// Актуализиране на брояча
+if positionState != 0
+    barsHeld := barsHeld + 1
+    if positionState == 1
+        highestSinceEntry := math.max(highestSinceEntry, high)
+    if positionState == -1
+        lowestSinceEntry := math.min(lowestSinceEntry, low)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ИЗЧИСЛЯВАНЕ НА ТЕКУЩА ПЕЧАЛБА
+// ═══════════════════════════════════════════════════════════════════════════════
+currentProfitPercent = 0.0
+if positionState == 1 and entryPrice > 0
+    currentProfitPercent := ((close - entryPrice) / entryPrice) * 100 - slippage - spread
+if positionState == -1 and entryPrice > 0
+    currentProfitPercent := ((entryPrice - close) / entryPrice) * 100 - slippage - spread
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ПРИОРИТЕТНИ УСЛОВИЯ ЗА ЗАТВАРЯНЕ
+// ═══════════════════════════════════════════════════════════════════════════════
+barsRequirementMet = barsHeld >= minBarsInPosition
+profitRequirementMet = currentProfitPercent >= minProfitToClose
+canClose = barsRequirementMet and profitRequirementMet
+
+// Stop-Loss проверка (работи винаги, независимо от филтрите)
+longStopHit = positionState == 1 and close <= entryPrice * (1 - stopLossPercent / 100)
+shortStopHit = positionState == -1 and close >= entryPrice * (1 + stopLossPercent / 100)
+
+// Trailing Stop проверка (работи само ако canClose)
+longTrailingHit = positionState == 1 and canClose and close <= highestSinceEntry * (1 - trailingStop / 100)
+shortTrailingHit = positionState == -1 and canClose and close >= lowestSinceEntry * (1 + trailingStop / 100)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// СИГНАЛИ
+// ═══════════════════════════════════════════════════════════════════════════════
+longSignal = (useLongConditionPivot and longConditionPivot or useLongConditionEMA and longConditionEMA) and longTrendCondition
+shortSignal = (useShortConditionPivot and shortConditionPivot or useShortConditionEMA and shortConditionEMA) and shortTrendCondition
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ИЗПЪЛНЕНИЕ НА ТРЕЙДОВЕ
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ЗАТВАРЯНЕ НА LONG
+if positionState == 1
+    // Stop-Loss (винаги работи)
+    if longStopHit
+        strategy.close_all(comment="Stop-Loss")
+        positionState := 0
+        barsHeld := 0
+        entryPrice := 0.0
+        highestSinceEntry := 0.0
+    // Trailing Stop (само ако canClose)
+    else if longTrailingHit
+        strategy.close_all(comment="Trailing Stop")
+        positionState := 0
+        barsHeld := 0
+        entryPrice := 0.0
+        highestSinceEntry := 0.0
+    // Обратен сигнал (само ако canClose)
+    else if shortSignal and canClose
+        strategy.close_all(comment="Reverse to Short")
+        positionState := 0
+        barsHeld := 0
+        entryPrice := 0.0
+        highestSinceEntry := 0.0
+
+// ЗАТВАРЯНЕ НА SHORT
+if positionState == -1
+    // Stop-Loss (винаги работи)
+    if shortStopHit
+        strategy.close_all(comment="Stop-Loss")
+        positionState := 0
+        barsHeld := 0
+        entryPrice := 0.0
+        lowestSinceEntry := 0.0
+    // Trailing Stop (само ако canClose)
+    else if shortTrailingHit
+        strategy.close_all(comment="Trailing Stop")
+        positionState := 0
+        barsHeld := 0
+        entryPrice := 0.0
+        lowestSinceEntry := 0.0
+    // Обратен сигнал (само ако canClose)
+    else if longSignal and canClose
+        strategy.close_all(comment="Reverse to Long")
+        positionState := 0
+        barsHeld := 0
+        entryPrice := 0.0
+        lowestSinceEntry := 0.0
+
+// ВХОД В LONG
+if longSignal and positionState == 0
+    if (useLongConditionPivot and longConditionPivot)
+        strategy.entry("Long Entry Pivot", strategy.long)
+    if (useLongConditionEMA and longConditionEMA)
+        strategy.entry("Long Entry EMA", strategy.long)
+    positionState := 1
+    barsHeld := 0
+    entryPrice := close
+    highestSinceEntry := high
+
+// ВХОД В SHORT
+if shortSignal and positionState == 0
+    if (useShortConditionPivot and shortConditionPivot)
+        strategy.entry("Short Entry Pivot", strategy.short)
+    if (useShortConditionEMA and shortConditionEMA)
+        strategy.entry("Short Entry EMA", strategy.short)
+    positionState := -1
+    barsHeld := 0
+    entryPrice := close
+    lowestSinceEntry := low
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// СИНХРОНИЗАЦИЯ
+// ═══════════════════════════════════════════════════════════════════════════════
+if strategy.position_size == 0 and positionState != 0
+    positionState := 0
+    barsHeld := 0
+    entryPrice := 0.0
+    highestSinceEntry := 0.0
+    lowestSinceEntry := 0.0
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEBUGGING
+// ═══════════════════════════════════════════════════════════════════════════════
+plotshape(series=useLongConditionPivot and longConditionPivot, title="Long Condition Pivot", location=location.belowbar, color=color.blue, style=shape.labelup, size=size.small)
+plotshape(series=useShortConditionPivot and shortConditionPivot, title="Short Condition Pivot", location=location.abovebar, color=color.orange, style=shape.labeldown, size=size.small)
+plotshape(series=useLongConditionEMA and longConditionEMA, title="Long Condition EMA", location=location.belowbar, color=color.green, style=shape.labelup, size=size.small)
+plotshape(series=useShortConditionEMA and shortConditionEMA, title="Short Condition EMA", location=location.abovebar, color=color.red, style=shape.labeldown, size=size.small)
+
+// Anti-Scalp debug
+plot(barsHeld, title="Bars Held", color=color.yellow, display=display.data_window)
+plot(currentProfitPercent, title="Current Profit %", color=color.white, display=display.data_window)
+plot(canClose ? 1 : 0, title="Can Close (Both conditions met)", color=color.lime, display=display.data_window)
+
+// Визуален индикатор когато НЕ МОЖЕ да затвори
+bgcolor(positionState != 0 and not canClose ? color.new(color.red, 90) : na, title="Cannot Close Zone")
