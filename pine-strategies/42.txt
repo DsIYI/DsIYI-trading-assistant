@@ -1,0 +1,141 @@
+//@version=5
+strategy('Neural Breakout v1.0 by Grok - Musk Power Edition', overlay=true, max_bars_back=500, calc_on_every_tick=false, default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=10000)
+
+// === INPUTS ===
+// Core: VWAP Breakout
+vwapLen = input.int(20, title='VWAP Length', minval=1)
+useVwapBreak = input.bool(true, title='Use VWAP Breakout?')
+
+// RSI Divergence (AI-like)
+rsiLen = input.int(14, title='RSI Length', minval=1)
+divLookback = input.int(5, title='Divergence Lookback', minval=2)
+useRsiDiv = input.bool(true, title='Use RSI Divergence?')
+
+// Volume Surge
+volMultiplier = input.float(2.0, title='Volume Multiplier', minval=1.0, step=0.1)
+useVolSurge = input.bool(true, title='Use Volume Surge?')
+
+// Filters (OFF for Power)
+useAdxFilter = input.bool(false, title='Use ADX (>20)?')
+minAdx = input.float(20, title='Min ADX')
+cooldownBars = input.int(1, title='Cooldown Bars (0=Off)', minval=0)
+var int lastSignalBar = na
+
+// Risk (Musk-Style: Aggressive but Safe)
+atrLen = input.int(14, title='ATR Length')
+stopLossATR = input.float(1.5, title='ATR SL Multiplier')
+takeProfitRR = input.float(2.5, title='Take Profit RR')  // Higher for big wins
+useTrailing = input.bool(true, title='Use Trailing After Breakeven?')
+breakevenPct = input.float(0.5, title='Breakeven Trigger %') / 100
+useShorts = input.bool(true, title='Enable Shorts?')
+
+// Time (Full Flexible, OFF Default)
+useTimeFilter = input.bool(false, title='Use Time Filter?')
+fromYear = input.int(2018, title='From Year')
+fromMonth = input.int(1, title='From Month')
+fromDay = input.int(1, title='From Day')
+toYear = input.int(2024, title='To Year')
+toMonth = input.int(12, title='To Month')
+toDay = input.int(31, title='To Day')
+startTime = timestamp(fromYear, fromMonth, fromDay, 0, 0)
+endTime = timestamp(toYear, toMonth, toDay, 23, 59)
+tradeWindow = not useTimeFilter or (time >= startTime and time <= endTime)
+
+// Cooldown
+cooldownPassed = cooldownBars == 0 or na(lastSignalBar) or bar_index - lastSignalBar > cooldownBars
+
+// === CALCULATIONS ===
+// VWAP
+vwapValue = ta.vwap(hlc3)
+vwapBullBreak = useVwapBreak and ta.crossover(close, vwapValue[1])
+vwapBearBreak = useVwapBreak and ta.crossunder(close, vwapValue[1])
+
+// RSI Divergence (Bullish: Price low, RSI higher low; Bearish: Price high, RSI lower high)
+rsi = ta.rsi(close, rsiLen)
+priceLow = ta.pivotlow(low, divLookback, divLookback)
+priceHigh = ta.pivothigh(high, divLookback, divLookback)
+rsiLow = ta.pivotlow(rsi, divLookback, divLookback)
+rsiHigh = ta.pivothigh(rsi, divLookback, divLookback)
+
+bullDiv = useRsiDiv and not na(priceLow) and not na(rsiLow[divLookback]) and low[divLookback] < low[divLookback * 2] and rsi[divLookback] > rsi[divLookback * 2]
+bearDiv = useRsiDiv and not na(priceHigh) and not na(rsiHigh[divLookback]) and high[divLookback] > high[divLookback * 2] and rsi[divLookback] < rsi[divLookback * 2]
+
+// Volume Surge
+volAvg = ta.sma(volume, 20)
+volSurge = useVolSurge and volume > volAvg * volMultiplier
+
+// ADX Filter
+[diplus, diminus, adx] = ta.dmi(14, 14)
+adxOk = not useAdxFilter or adx > minAdx
+
+// Signals (Power Mode: OR for Bull/Bear)
+bullCondition = (vwapBullBreak or bullDiv) and volSurge and adxOk and cooldownPassed and tradeWindow
+bearCondition = (vwapBearBreak or bearDiv) and volSurge and adxOk and cooldownPassed and tradeWindow
+
+bullishSignal = bullCondition
+bearishSignal = bearCondition
+
+// Update Cooldown
+if bullishSignal or bearishSignal
+    lastSignalBar := bar_index
+
+// === EXECUTION ===
+var float entryPrice = na
+
+// Long Entry
+if bullishSignal and strategy.position_size <= 0
+    if strategy.position_size < 0
+        strategy.close('SHORT')
+    strategy.entry('LONG', strategy.long)
+    entryPrice := close
+
+// Short Entry
+if bearishSignal and strategy.position_size >= 0 and useShorts
+    if strategy.position_size > 0
+        strategy.close('LONG')
+    strategy.entry('SHORT', strategy.short)
+    entryPrice := close
+
+// Exits & Risk
+atrValue = ta.atr(atrLen)
+if strategy.position_size > 0  // Long
+    sl = entryPrice - atrValue * stopLossATR
+    tp = entryPrice + atrValue * stopLossATR * takeProfitRR
+    beReached = (close - entryPrice) / entryPrice >= breakevenPct
+    trailPrice = useTrailing and beReached ? close : na
+    trailOffset = useTrailing and beReached ? atrValue * 0.5 / syminfo.mintick : na
+    strategy.exit('Exit Long', 'LONG', stop=sl, limit=tp, trail_price=trailPrice, trail_offset=trailOffset)
+
+if strategy.position_size < 0  // Short
+    sl = entryPrice + atrValue * stopLossATR
+    tp = entryPrice - atrValue * stopLossATR * takeProfitRR
+    beReached = (entryPrice - close) / entryPrice >= breakevenPct
+    trailPrice = useTrailing and beReached ? close : na
+    trailOffset = useTrailing and beReached ? atrValue * 0.5 / syminfo.mintick : na
+    strategy.exit('Exit Short', 'SHORT', stop=sl, limit=tp, trail_price=trailPrice, trail_offset=trailOffset)
+
+if strategy.position_size == 0
+    entryPrice := na
+
+// === VISUALIZATION ===
+plot(vwapValue, color=color.yellow, title='VWAP', linewidth=2)
+plot(rsi, title='RSI', color=color.purple, display=display.pane)  // In separate pane
+
+plotshape(bullishSignal, title='Buy', style=shape.triangleup, location=location.belowbar, color=color.green, size=size.large)
+plotshape(bearishSignal, title='Sell', style=shape.triangledown, location=location.abovebar, color=color.red, size=size.large)
+
+// Debug Table
+if barstate.islast
+    var table debug = table.new(position.top_right, 2, 4, bgcolor=color.white, border_width=1)
+    table.cell(debug, 0, 0, 'Volume Surge', text_color=color.black)
+    table.cell(debug, 1, 0, volSurge ? 'YES' : 'NO', text_color=volSurge ? color.green : color.red)
+    table.cell(debug, 0, 1, 'ADX OK', text_color=color.black)
+    table.cell(debug, 1, 1, adxOk ? 'YES' : 'NO', text_color=adxOk ? color.green : color.red)
+    table.cell(debug, 0, 2, 'Cooldown', text_color=color.black)
+    table.cell(debug, 1, 2, cooldownPassed ? 'OK' : 'WAIT', text_color=cooldownPassed ? color.green : color.red)
+    table.cell(debug, 0, 3, 'Position', text_color=color.black)
+    table.cell(debug, 1, 3, strategy.position_size > 0 ? 'LONG' : strategy.position_size < 0 ? 'SHORT' : 'FLAT', text_color=color.blue)
+
+// Alerts
+alertcondition(bullishSignal, title='Musk Buy Alert', message='🚀 LONG Breakout!')
+alertcondition(bearishSignal, title='Musk Sell Alert', message='🔴 SHORT Divergence!')

@@ -1,0 +1,81 @@
+//@version=6
+strategy(title = '[RS][NM]Linear Regression Bull and Bear Power with ZLEMA Strategy v05', shorttitle = 'LRBBP_ZLEMA_Strategy_v05', overlay = true)
+
+// Inputs for the original indicator
+window = input(10, title = 'Lookback Window:')
+smooth = input(true, title = 'Smooth ?')
+smap = input.int(5, title = 'Smooth factor', minval = 2, maxval = 10)
+sigma = input.int(6, title = 'Sigma')
+smoothType = input.string('SMA', title = 'Smoothing Type', options = ['SMA', 'EMA', 'HMA'])
+
+// ZLEMA inputs and calculation
+lengthZLEMA = input(10, title = 'ZLEMA Length')
+src = close
+ema1 = ta.ema(src, lengthZLEMA)
+ema2 = ta.ema(ema1, lengthZLEMA)
+d = ema1 - ema2
+zlema = ema1 + d
+plot(zlema, title = 'ZLEMA', color = color.blue)
+
+// Adjusted dynamic window calculation to ensure a minimum value of 1
+volatility = ta.atr(14)
+dynamicWindow = math.max(math.round(volatility * 10), window, 1)
+
+// Using 'maxval' safeguard for 'ta.highest' and 'ta.lowest' functions
+safeWindow = math.max(dynamicWindow, 1) // Ensure at least 1 to avoid 'length' errors
+
+// Modified f_exp_lr function to avoid division by zero
+f_exp_lr(_height, _length) =>
+    _ret = if _length != 0
+        _height + _height / _length
+    else
+        na
+    _ret
+
+// Calculations with safeWindow to ensure valid 'length' arguments
+h_value = ta.highest(close, safeWindow)
+l_value = ta.lowest(close, safeWindow)
+h_bar = safeWindow - ta.highestbars(close, safeWindow)
+l_bar = safeWindow - ta.lowestbars(close, safeWindow)
+
+bear = 0 - (f_exp_lr(h_value - close, safeWindow - h_bar) > 0 ? f_exp_lr(h_value - close, safeWindow - h_bar) : 0)
+bull = 0 + (f_exp_lr(close - l_value, safeWindow - l_bar) > 0 ? f_exp_lr(close - l_value, safeWindow - l_bar) : 0)
+
+// Initialize direction with a type that allows na values
+var float direction = na
+directionRaw = bull + bear
+if smoothType == 'SMA'
+    direction := ta.sma(directionRaw, smap)
+    direction
+else if smoothType == 'EMA'
+    direction := ta.ema(directionRaw, smap)
+    direction
+else if smoothType == 'HMA'
+    direction := ta.hma(directionRaw, smap)
+    direction
+else
+    direction := directionRaw
+    direction
+
+// Determine signal color
+dcolor = direction > direction[1] ? color.green : direction < direction[1] ? color.red : color.yellow
+
+// Strategy logic
+isDirectionValid = not na(direction) and not na(direction[1])
+longCondition = isDirectionValid and ta.crossover(direction, direction[1]) and close > zlema
+shortCondition = isDirectionValid and ta.crossunder(direction, direction[1]) and close < zlema
+
+if longCondition
+    strategy.entry('Long', strategy.long, comment = 'Long Entry')
+
+if shortCondition
+    strategy.entry('Short', strategy.short, comment = 'Short Entry')
+
+// Debugging Output
+plotchar(dynamicWindow, title = 'Dynamic Window Value', location = location.top, color = color.red)
+
+// Plotting for visualization
+plot(series = bear, title = 'Bear', style = plot.style_columns, color = color.new(color.maroon, 92))
+plot(series = bull, title = 'Bull', style = plot.style_columns, color = color.new(color.green, 92))
+plot(series = direction, title = 'Direction', style = plot.style_line, linewidth = 3, color = dcolor)
+plot(0, title = 'Zero Line', color = color.new(color.black, 0))

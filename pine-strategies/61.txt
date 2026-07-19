@@ -1,0 +1,81 @@
+//@version=6
+strategy('[SHK] STC Strategy (HA, Reversible, Delay)', overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === INPUTS ===
+stcLength   = input.int(12, 'STC Length')
+fastLength = input.int(26, 'Fast EMA Length')
+slowLength = input.int(50, 'Slow EMA Length')
+
+alpha      = input.float(0.5, 'EMA Smoothing Factor', minval=0.01, step=0.01)
+slPercent  = input.float(0.001, 'Stop-Loss (%)', step=0.001) / 100
+fromYear   = input.int(2020, 'From Year')
+fromMonth  = input.int(1, 'From Month')
+fromDay    = input.int(1, 'From Day')
+toYear     = input.int(2099, 'To Year')
+toMonth    = input.int(12, 'To Month')
+toDay      = input.int(31, 'To Day')
+delaySec   = input.int(5, 'Delay Between Trades (Seconds)', minval=1, maxval=99)
+
+// === TIME FILTER ===
+startTime = timestamp(fromYear, fromMonth, fromDay, 0, 0)
+endTime   = timestamp(toYear, toMonth, toDay, 23, 59)
+isInTime   = (time >= startTime and time <= endTime)
+
+// === STC FUNCTION ===
+macd_source(_src, _fast, _slow) => ta.ema(_src, _fast) - ta.ema(_src, _slow)
+stc(_length, _fast, _slow) =>
+    var float stoch1 = na
+    var float emaStoch1 = na
+    var float stoch2 = na
+    var float emaStoch2 = na
+    _macd = macd_source(close, _fast, _slow)
+    llv1 = ta.lowest(_macd, _length)
+    hhv1 = ta.highest(_macd, _length)
+    stoch1 := (hhv1 - llv1 != 0) ? (_macd - llv1) / (hhv1 - llv1) * 100 : nz(stoch1[1])
+    emaStoch1 := na(emaStoch1[1]) ? stoch1 : emaStoch1[1] + alpha * (stoch1 - emaStoch1[1])
+    llv2 = ta.lowest(emaStoch1, _length)
+    hhv2 = ta.highest(emaStoch1, _length)
+    stoch2 := (hhv2 - llv2 != 0) ? (emaStoch1 - llv2) / (hhv2 - llv2) * 100 : nz(stoch2[1])
+    emaStoch2 := na(emaStoch2[1]) ? stoch2 : emaStoch2[1] + alpha * (stoch2 - emaStoch2[1])
+    emaStoch2
+
+stcVal = stc(stcLength, fastLength, slowLength)
+isGreen = stcVal > stcVal[1]
+isRed   = stcVal < stcVal[1]
+
+// === TRADE LOGIC ===
+var int lastTPTime = na
+inDelay = na(lastTPTime) ? false : (time - lastTPTime < delaySec * 1000)
+
+noPosition = strategy.position_size == 0
+longCondition  = noPosition and isGreen and isRed[1] and not inDelay and isInTime
+shortCondition = noPosition and isRed and isGreen[1] and not inDelay and isInTime
+
+exitLong  = strategy.position_size > 0 and isRed
+exitShort = strategy.position_size < 0 and isGreen
+
+if longCondition
+    strategy.entry("Buy Long", strategy.long)
+
+if shortCondition
+    strategy.entry("Buy Short", strategy.short)
+
+if exitLong
+    strategy.close("Buy Long", comment="Sell Long")
+    lastTPTime := time
+
+if exitShort
+    strategy.close("Buy Short", comment="Sell Short")
+    lastTPTime := time
+
+// === STOP LOSS ===
+if strategy.position_size > 0
+    strategy.exit("SL Long", from_entry="Buy Long", stop=strategy.position_avg_price * (1 - slPercent))
+if strategy.position_size < 0
+    strategy.exit("SL Short", from_entry="Buy Short", stop=strategy.position_avg_price * (1 + slPercent))
+
+// === PLOT STC ===
+stcColor = isGreen ? color.green : color.red
+plot(stcVal, title='STC', color=stcColor, linewidth=2)
+plot(25, color=color.new(color.gray, 80))
+plot(75, color=color.new(color.gray, 80))

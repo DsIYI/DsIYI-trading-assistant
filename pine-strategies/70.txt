@@ -1,0 +1,322 @@
+//@version=5
+strategy('AI-2-1-Second Scalper • Secure Scalp (5m) + Cash • V6.1',
+     overlay = true,
+     max_bars_back = 5000,
+     initial_capital = 100,
+     currency = currency.USDT,
+
+     // ➤ CRITICAL: Use 'strategy.cash' so Bybit accepts orders on small accounts.
+     // 'default_qty_value' is the Notional Value (e.g., $150 position).
+     default_qty_type = strategy.cash,
+     default_qty_value = 100,
+     
+     commission_type = strategy.commission.percent,
+     commission_value = 0.06)
+
+// ───────────────────────────── AUTO-DETECT SYMBOL ─────────────────────
+isSOL = syminfo.ticker == 'SOLUSDT'
+isMYX = syminfo.ticker == 'MYXUSDT'
+
+// ───────────────────────────── USER INPUTS ────────────────────────────
+// NOTE: Default values here (e.g., FastEMA=6) are kept for the "resetToAuto"
+// comparison logic. The 'Auto Profile' overrides these when the box is checked.
+
+// === MANUAL INPUTS ===
+leverage = input.int(100, 'Leverage (manual override)', minval = 1, maxval = 100)
+maxRiskPercent = input.float(1.0, 'Max Risk % per Trade', minval = 0.1, maxval = 10.0, step = 0.1)
+minNotional = input.float(5.0, 'Min Notional Value ($)', step = 1.0)
+
+// Core Strategy Parameters (Defaults for Reset Detection)
+fastEMA = input.int(6, 'Fast EMA', minval = 1)
+slowEMA = input.int(15, 'Slow EMA', minval = 1)
+leftBars = input.int(3, 'Pivot left', minval = 1)
+rightBars = input.int(3, 'Pivot right', minval = 1)
+
+slATRmult = input.float(0.8, 'SL – ATR mult (Technical Stop)', step = 0.1)
+tpATRmult = input.float(1.5, 'TP – ATR mult', step = 0.1)
+
+trailingTP_pct = input.float(0.3, 'Trailing TP (%)', step = 0.001)
+hardStop_pct = input.float(1.5, 'Hard Stop % (Safety Wall)', step = 0.1)
+
+moveToBE = input.bool(true, 'Move Stop to BE after partial TP?')
+tp1Mult = input.float(0.5, 'TP1 (trigger BE) = X * SL Distance', step=0.1)
+
+// Filters
+strategyMode = input.string('Normal', 'Strategy mode', options = ['Normal', 'Reverse', 'TP-only'])
+useVolumeFilter = input.bool(true, 'Use Volume Filter?')
+useRSIFilter = input.bool(true, 'Use RSI Filter?')
+useADX_input = input.bool(true, 'Require ADX > 20?')
+
+// HTF Filter (Default for Reset Detection)
+useHTF = input.bool(true, "Use HTF filter?")
+htfTF_input  = input.timeframe("30", "HTF Timeframe")
+htfEMAlen    = input.int(100, "HTF EMA length")
+
+// Backtest and Execution
+startDate = input.time(timestamp('1 May 2024 00:00 +0000'), 'Back-test FROM')
+endDate = input.time(timestamp('1 Jan 2099 00:00 +0000'), 'Back-test TO')
+inTradePeriod = time >= startDate and time <= endDate
+
+onBarClose = input.bool(true, 'Require \'on bar close\' for entries?', group="Execution")
+maxDrawdownPct = input.float(15.0, 'Max Drawdown % (halt trading)', step = 1.0)
+slippageTicks_input = input.int(2, 'Slippage (ticks)', minval=0)
+atrLen = input.int(14, 'ATR length')
+
+// ➤ RISK MANAGEMENT (For $100 Account)
+maxDollarRiskPerTrade = input.float(3.0, 'Max $ Risk Per Trade (overrides %)', step = 0.5, group = 'Risk Management')
+dailyLossLimit = input.float(10.0, 'Max Daily Loss ($USD)', step = 1.0, group = 'Risk Management')
+useRiskScaling = input.bool(true, '📉 Scale Risk Down with Drawdown?', group = 'Risk Management')
+
+// ➤ RESET BUTTON
+resetToAuto = input.bool(true, '☑️ Reset to Secure Scalping Profile (5m/25x)', group='Profile Control')
+
+
+// ───────────────────── DYNAMIC RUNTIME PROFILE SELECTOR ───────────────
+// V6.1: Optimized for Lower Timeframe (e.g., 5m) Scalping
+
+// --- SECURE SCALPING PROFILE (5m) ---
+SOL_LEVERAGE     = 25      // Secure 25x
+SOL_MAXRISK      = 3.0     // 3% Risk
+
+// Slower/Wider settings for lower TF noise reduction
+SOL_FASTEMA      = 12
+SOL_SLOWEMA      = 30
+SOL_LEFTBARS     = 8
+SOL_RIGHTBARS    = 8
+
+// ATR Stops (Tighter multiplier for smaller 5m ATR)
+SOL_SLATR        = 2.0
+SOL_TPATR        = 3.5
+
+SOL_TRAILTP      = 0.8
+SOL_HARDSTOP     = 3.5   // The final 3.5% wall (Safe for 25x)
+
+SOL_USEADX       = false
+SOL_HTFTF        = "60"  // 1H HTF for 5m chart
+SOL_SLIPPAGE     = 2
+
+
+// --- MYX PROFILE (Adjust if needed) ---
+autoLeverage     = isMYX ? 25 : SOL_LEVERAGE
+autoMaxRisk      = isMYX ? 3.0 : SOL_MAXRISK
+autoFastEMA      = isMYX ? 8 : SOL_FASTEMA
+autoSlowEMA      = isMYX ? 21 : SOL_SLOWEMA
+autoLeftBars     = isMYX ? 4 : SOL_LEFTBARS
+autoRightBars    = isMYX ? 4 : SOL_RIGHTBARS
+autoSLATRmult    = isMYX ? 1.2 : SOL_SLATR
+autoTPATRmult    = isMYX ? 1.2 : SOL_TPATR
+autoTrailingTP   = isMYX ? 0.5 : SOL_TRAILTP
+autoHardStop     = isMYX ? 3.5 : SOL_HARDSTOP
+autoUseADX       = isMYX ? false : SOL_USEADX
+autoHTFTF        = isMYX ? "30" : SOL_HTFTF
+autoSlippage     = isMYX ? 2 : SOL_SLIPPAGE
+
+// ➤ APPLY RESET LOGIC: Compares against OLD defaults to see if user manually changed it.
+activeLeverage     = resetToAuto ? autoLeverage     : leverage     == 100 ? autoLeverage     : leverage
+activeMaxRisk      = resetToAuto ? autoMaxRisk      : maxRiskPercent == 1.0 ? autoMaxRisk      : maxRiskPercent
+activeFastEMA      = resetToAuto ? autoFastEMA      : fastEMA      == 6   ? autoFastEMA      : fastEMA
+activeSlowEMA      = resetToAuto ? autoSlowEMA      : slowEMA      == 15  ? autoSlowEMA      : slowEMA
+activeLeftBars     = resetToAuto ? autoLeftBars     : leftBars     == 3   ? autoLeftBars     : leftBars
+activeRightBars    = resetToAuto ? autoRightBars    : rightBars    == 3   ? autoRightBars    : rightBars
+activeSLATRmult    = resetToAuto ? autoSLATRmult    : slATRmult    == 0.8 ? autoSLATRmult    : slATRmult
+activeTPATRmult    = resetToAuto ? autoTPATRmult    : tpATRmult    == 1.5 ? autoTPATRmult    : tpATRmult
+activeTrailingTP   = resetToAuto ? autoTrailingTP   : trailingTP_pct == 0.3 ? autoTrailingTP   : trailingTP_pct
+activeHardStop     = resetToAuto ? autoHardStop     : hardStop_pct == 1.5 ? autoHardStop     : hardStop_pct
+activeUseADX       = resetToAuto ? autoUseADX       : useADX_input == true? autoUseADX       : useADX_input
+activeHTFTF        = resetToAuto ? autoHTFTF        : htfTF_input  == "30"? autoHTFTF        : htfTF_input
+activeSlippage     = resetToAuto ? autoSlippage     : slippageTicks_input== 2 ? autoSlippage   : slippageTicks_input
+
+
+// ───────────────────── DAILY LOSS TRACKER ─────────────────────────────
+var float sessionStartEquity = na
+newDay = bool(ta.change(time('D'))) or na(sessionStartEquity)
+if newDay
+    sessionStartEquity := strategy.equity
+
+todayPnL = strategy.equity - sessionStartEquity
+tooMuchDailyLoss = todayPnL <= -dailyLossLimit
+
+if tooMuchDailyLoss and strategy.position_size != 0
+    strategy.close_all(comment = '⛔ Daily Loss Limit Hit')
+
+// ───────────────────────────── CORE INDICATORS ───────────────────────
+fEMA = ta.ema(close, activeFastEMA)
+sEMA = ta.ema(close, activeSlowEMA)
+
+htfClose = request.security(syminfo.tickerid, activeHTFTF, close, lookahead = barmerge.lookahead_off)
+htfEMA = ta.ema(htfClose, htfEMAlen)
+
+var bool htfTrendUp = false
+var bool htfTrendDn = false
+if barstate.isconfirmed
+    htfTrendUp := bool(htfClose > htfEMA)
+    htfTrendDn := bool(htfClose < htfEMA)
+else
+    htfTrendUp := htfTrendUp[1]
+    htfTrendDn := htfTrendDn[1]
+
+pivotH = ta.pivothigh(high, activeLeftBars, activeRightBars)
+pivotL = ta.pivotlow(low, activeLeftBars, activeRightBars)
+
+var bool validPivotL = false, var bool validPivotH = false
+if barstate.isconfirmed
+    validPivotL := not na(pivotL)
+    validPivotH := not na(pivotH)
+else
+    validPivotL := validPivotL[1], validPivotH := validPivotH[1]
+
+atr = ta.atr(atrLen)
+rsi = ta.rsi(close, 14)
+volAvg = ta.sma(volume, 20)
+[dmiPlus, dmiMinus, adx] = ta.dmi(14, 14)
+
+// Filters
+var bool filtersConfirmed = false
+if barstate.isconfirmed
+    volumeFilter = bool(not useVolumeFilter or volume > volAvg * 1.5)
+    rsiL = bool(not useRSIFilter or rsi < 70)
+    rsiS = bool(not useRSIFilter or rsi > 30)
+    adxFilter = bool(not activeUseADX or adx > 20)
+    
+    // Combine filters: Vol and ADX are universal. RSI is side-specific.
+    filtersConfirmed := volumeFilter and adxFilter
+else
+    filtersConfirmed := filtersConfirmed[1]
+
+bullBias = not useHTF or htfTrendUp
+bearBias = not useHTF or htfTrendDn
+
+longSignal  = validPivotL and (fEMA > sEMA) and bullBias and filtersConfirmed and (not useRSIFilter or rsi < 70)
+shortSignal = validPivotH and (fEMA < sEMA) and bearBias and filtersConfirmed and (not useRSIFilter or rsi > 30)
+
+// Strategy Mode
+if strategyMode == 'Reverse'
+    tmp = longSignal, longSignal := shortSignal, shortSignal := tmp
+if strategyMode == 'TP-only'
+    longSignal := false, shortSignal := false
+
+// Drawdown & Position Check
+noPosition = strategy.position_size == 0
+peakEquity = ta.highest(strategy.equity, 500)
+drawdownPct = (peakEquity - strategy.equity) / peakEquity * 100
+tooMuchDrawdown = drawdownPct > maxDrawdownPct
+
+var bool finalLong = false, var bool finalShort = false
+if barstate.isconfirmed
+    entryOK = not onBarClose or barstate.isconfirmed
+    safetyOK = not tooMuchDailyLoss and not tooMuchDrawdown
+    finalLong  := bool(inTradePeriod and longSignal and entryOK and noPosition and safetyOK)
+    finalShort := bool(inTradePeriod and shortSignal and entryOK and noPosition and safetyOK)
+else
+    finalLong := finalLong[1], finalShort := finalShort[1]
+
+// ───────────────────────────── POSITION SIZING (CASH MODE) ─────────
+price = close
+activeTickSize = (syminfo.mintick * 1) // Use chart's actual tick size
+
+// 1. Determine the Stop Distance (Use the TIGHTER of ATR or Hard Stop % for sizing)
+stopDistATR = (activeSLATRmult * atr)
+stopDistHard = (activeHardStop / 100.0) * price
+stopDistanceUSD = math.min(stopDistATR, stopDistHard)
+stopDistanceUSD := math.max(stopDistanceUSD, activeTickSize * 2) // Ensure min distance
+
+// 2. Calculate Risk Amount ($)
+baseRisk = strategy.equity * (activeMaxRisk / 100.0)
+scaledRisk = useRiskScaling ? baseRisk * math.max(0.2, 1.0 - drawdownPct/100.0) : baseRisk
+dollarRisk = math.min(scaledRisk, maxDollarRiskPerTrade)
+
+// 3. Calculate Position Notional Value (Risk $ / Risk Fraction)
+riskFraction = stopDistanceUSD / price
+
+// If stop is effectively 0 (e.g., start of history), use minimum position size
+positionNotional = riskFraction > 0.0001 ? (dollarRisk / riskFraction) : minNotional
+
+// 4. Apply Leverage Safety Cap (Ensures you have enough margin)
+maxAllowedNotional = (strategy.equity + strategy.open_profit) * activeLeverage
+finalNotional = math.min(positionNotional, maxAllowedNotional)
+
+// 5. Apply Exchange Minimum (e.g., $5)
+finalNotional := math.max(finalNotional, minNotional)
+
+// In 'strategy.cash' mode, 'qty' = Notional Value ($)
+qty = finalNotional
+validQty = true
+
+// ───────────────────────────── EXIT SETUP ────────────────────────────
+mintick = activeTickSize
+
+// Technical Target (ATR-based)
+profitTicks = math.max(1, math.round(activeTPATRmult * atr / mintick))
+
+// Technical Stop (ATR-based)
+lossTicksATR = math.max(1, math.round(stopDistATR / mintick))
+
+// Hard Stop (Percentage-based)
+hardStopTicks = math.max(1, math.round(stopDistHard / mintick))
+
+// Use the TIGHTER of the two for the primary exit
+exitLossTicks = math.min(lossTicksATR, hardStopTicks)
+
+// Trailing
+trailingTicks = activeTrailingTP > 0.0 ? math.max(1, math.round(activeTrailingTP / 100.0 * price / mintick)) : na
+
+varip float breakevenPriceLong = na, varip float breakevenPriceShort = na
+if noPosition
+    breakevenPriceLong := na, breakevenPriceShort := na
+
+// Entry Prices with Slippage
+longEntryPrice = price + (activeSlippage * mintick)
+shortEntryPrice = price - (activeSlippage * mintick)
+
+// ───────────────────────────── EXECUTION ─────────────────────────────
+if finalLong and validQty
+    strategy.entry('LONG', strategy.long, qty = qty, limit = longEntryPrice)
+    breakevenPriceLong := na
+
+if finalShort and validQty
+    strategy.entry('SHORT', strategy.short, qty = qty, limit = shortEntryPrice)
+    breakevenPriceShort := na
+
+// (Exit Execution Logic)
+if strategy.position_size > 0
+    avgPrice = strategy.position_avg_price
+    // Use the actual stop distance for BE trigger calculation
+    tp1Level = avgPrice + (stopDistanceUSD * tp1Mult)
+    
+    if barstate.isconfirmed and moveToBE and high >= tp1Level and na(breakevenPriceLong)
+        breakevenPriceLong := avgPrice
+
+    // For trailing stops, the 'stop' price must be below the current price.
+    currentStopPrice = avgPrice - (exitLossTicks * mintick)
+
+    if not na(trailingTicks)
+        strategy.exit('LX_trail', from_entry = 'LONG', trail_points = trailingTicks, trail_offset = trailingTicks / 2, stop=currentStopPrice)
+    else if not na(breakevenPriceLong)
+        strategy.exit('LX_BE', from_entry = 'LONG', stop = breakevenPriceLong)
+    else
+        strategy.exit('LX', from_entry = 'LONG', profit = profitTicks, loss = exitLossTicks)
+
+if strategy.position_size < 0
+    avgPrice = strategy.position_avg_price
+    tp1Level = avgPrice - (stopDistanceUSD * tp1Mult)
+
+    if barstate.isconfirmed and moveToBE and low <= tp1Level and na(breakevenPriceShort)
+        breakevenPriceShort := avgPrice
+
+    currentStopPrice = avgPrice + (exitLossTicks * mintick)
+
+    if not na(trailingTicks)
+        strategy.exit('SX_trail', from_entry = 'SHORT', trail_points = trailingTicks, trail_offset = trailingTicks / 2, stop=currentStopPrice)
+    else if not na(breakevenPriceShort)
+        strategy.exit('SX_BE', from_entry = 'SHORT', stop = breakevenPriceShort)
+    else
+        strategy.exit('SX', from_entry = 'SHORT', profit = profitTicks, loss = exitLossTicks)
+
+// ───────────────────────────── ALERTS & DEBUG ─────────────────────────
+// Calculate the quantity for the alert log
+calculatedQty = qty / price
+
+alertMessage(side) =>
+    '{"ticker":"' + syminfo.ticker + '","side":"' + side + '","notional":' + str.tostring(math.round(qty,2)) + ',"qty":' + str.tostring(math.round(calculatedQty, 3)) + // Approx Qty',"lev":' + str.tostring(activeLeverage) + ',"risk_usd":' + str.tostring(math.round(dollarRisk,2)) + '}'if finalLongalert(alertMessage('BUY'), freq = alert.freq_once_per_bar)if finalShortalert(alertMessage('SELL'), freq = alert.freq_once_per_bar)if finalLong or finalShort or tooMuchDailyLosseffectiveStopPct = (stopDistanceUSD / price) * 100l_txt = 'Notional: $' + str.tostring(math.round(qty,2)) + '\nRisk$: $' + str.tostring(math.round(dollarRisk,2)) + '\nStop: ' + str.tostring(math.round(effectiveStopPct,2)) + '%' +'\nLev: ' + str.tostring(activeLeverage) + 'x' +(tooMuchDailyLoss ? '\n⛔ HALTED (Daily Loss)' : '')label.new(bar_index, high, text=l_txt, color=tooMuchDailyLoss ? color.red : color.orange, textcolor=color.white, size=size.small)plot(strategy.equity, title = 'Equity Curve', color = color.fuchsia, linewidth = 2)bgcolor(tooMuchDailyLoss ? color.new(color.red, 80) : na)
+
+

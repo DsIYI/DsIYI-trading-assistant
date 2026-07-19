@@ -1,0 +1,68 @@
+//@version=6
+indicator('[SHK] STC Early Alert Indicator', shorttitle='STC Alerts', overlay=false)
+
+// === INPUTS ===
+length      = input.int(12, title='STC Length')
+fastLength  = input.int(26, title='Fast EMA Length')
+slowLength  = input.int(50, title='Slow EMA Length')
+smoothing   = input.float(0.5, title='Smoothing Factor', minval=0.01, step=0.01)
+
+lowerThresh = input.int(25, title='Lower Threshold')
+upperThresh = input.int(75, title='Upper Threshold')
+
+modeChoice  = input.string("Color Flip", title="Alert Mode", options=["Color Flip", "Threshold Confirmed"])
+
+// === STC FUNCTION ===
+macd(src, fastLength, slowLength) =>
+    fastMA = ta.ema(src, fastLength)
+    slowMA = ta.ema(src, slowLength)
+    fastMA - slowMA
+
+stc(len, fastLength, slowLength, smooth) =>
+    macdLine = macd(close, fastLength, slowLength)
+    ll1 = ta.lowest(macdLine, len)
+    hh1 = ta.highest(macdLine, len)
+    k = hh1 - ll1 > 0 ? (macdLine - ll1) / (hh1 - ll1) * 100 : nz(0)
+
+    // First smoothing
+    k_smooth = 0.0
+    k_smooth := na(k_smooth[1]) ? k : k_smooth[1] + smooth * (k - k_smooth[1])
+
+    ll2 = ta.lowest(k_smooth, len)
+    hh2 = ta.highest(k_smooth, len)
+    d = hh2 - ll2 > 0 ? (k_smooth - ll2) / (hh2 - ll2) * 100 : nz(0)
+
+    // Final smoothing
+    d_smooth = 0.0
+    d_smooth := na(d_smooth[1]) ? d : d_smooth[1] + smooth * (d - d_smooth[1])
+
+    d_smooth
+
+// === CALC ===
+stcVal = stc(length, fastLength, slowLength, smoothing)
+stcColor = stcVal > stcVal[1] ? color.green : color.red
+
+plot(stcVal, title='STC', color=stcColor, linewidth=2)
+h1 = hline(lowerThresh, 'Lower Threshold', color=color.gray, linestyle=hline.style_dashed)
+h2 = hline(upperThresh, 'Upper Threshold', color=color.gray, linestyle=hline.style_dashed)
+fill(h1, h2, color=color.new(color.gray, 90))  // <- fixed transparency syntax
+
+// === ALERT LOGIC ===
+bullFlip = stcVal[2] < stcVal[1] and stcVal[1] < stcVal and stcVal > stcVal[1]
+bearFlip = stcVal[2] > stcVal[1] and stcVal[1] > stcVal and stcVal < stcVal[1]
+
+bullConfirm = bullFlip and stcVal < lowerThresh
+bearConfirm = bearFlip and stcVal > upperThresh
+
+useConfirm = modeChoice == "Threshold Confirmed"
+
+buySignal  = useConfirm ? bullConfirm : bullFlip
+sellSignal = useConfirm ? bearConfirm : bearFlip
+
+// === ALERT CONDITIONS ===
+alertcondition(buySignal, title='Buy Alert', message='STC Buy Alert (Early)')
+alertcondition(sellSignal, title='Sell Alert', message='STC Sell Alert (Early)')
+
+// === OPTIONAL HIGHLIGHT ===
+bgcolor(buySignal ? color.new(color.green, 85) : na)
+bgcolor(sellSignal ? color.new(color.red, 85) : na)

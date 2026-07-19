@@ -1,0 +1,251 @@
+//@version=5
+strategy("A - Supertrend FULL STRATEGY + BAR CONFIRM + SL + Trail TP v2",
+     overlay=true,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=100,
+     initial_capital=1000,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05)
+
+//=====================================================
+// TIME FILTER
+//=====================================================
+useTime = input.bool(true, "Enable Time Filter", group="TIME")
+fromY   = input.int(2026, "From Year",  group="TIME")
+fromM   = input.int(1,    "From Month", group="TIME")
+fromD   = input.int(1,    "From Day",   group="TIME")
+toY     = input.int(9999, "To Year",    group="TIME")
+toM     = input.int(12,   "To Month",   group="TIME")
+toD     = input.int(31,   "To Day",     group="TIME")
+
+start  = timestamp(fromY, fromM, fromD, 0, 0)
+finish = timestamp(toY,   toM,   toD,   23, 59)
+timeOk = not useTime or (time >= start and time <= finish)
+
+//=====================================================
+// RISK — SL + TRAILING TP
+//=====================================================
+sl          = input.float(2.0, "Stop Loss %",                group="RISK", minval=0.1, step=0.1)
+useTrailTP  = input.bool(true, "Use Trailing Take Profit",    group="RISK")
+trailAct    = input.float(1.0, "Trail Activate at % profit",  group="RISK", minval=0.1, step=0.1,
+     tooltip="Trailing TP активира след X% печалба от entry.")
+trailOffset = input.float(0.5, "Trail Offset %",              group="RISK", minval=0.1, step=0.1,
+     tooltip="Излиза ако цената се върне с X% от пика.")
+
+//=====================================================
+// SIGNAL CONFIRMATION
+//=====================================================
+tfSec             = timeframe.in_seconds(timeframe.period)
+confirmSec        = input.int(45, "Confirmation Seconds (1s bars)", group="CONFIRMATION", minval=1,
+     tooltip="Брой 1-секундни барове които сигналът трябва да стои непрекъснато. На 1m chart: 45s = 1 бар. На 1s chart: 45s = 45 бара.")
+confirmBarsNeeded = math.max(1, math.round(confirmSec / tfSec))
+
+//=====================================================
+// FILTERS
+//=====================================================
+useEMA  = input.bool(true,  "EMA Filter",    group="FILTERS")
+useVOL  = input.bool(true,  "Volume Filter", group="FILTERS")
+useRSI  = input.bool(false, "RSI Filter",    group="FILTERS")
+useBSPR = input.bool(true,  "BSPR Filter",   group="FILTERS")
+
+//=====================================================
+// EMA
+//=====================================================
+fastLen = input.int(9,  "Fast EMA", group="EMA", minval=1)
+slowLen = input.int(21, "Slow EMA", group="EMA", minval=1)
+
+//=====================================================
+// SUPERTREND
+//=====================================================
+atrLen = input.int(7,     "ATR Length", group="SUPERTREND", minval=1)
+factor = input.float(0.5, "Factor",     group="SUPERTREND", minval=0.01, step=0.1)
+
+//=====================================================
+// VOLUME
+//=====================================================
+volLen = input.int(50, "Volume MA Length", group="VOLUME", minval=1)
+
+//=====================================================
+// RSI
+//=====================================================
+rsiLen = input.int(14, "RSI Length",     group="RSI", minval=1)
+rsiOB  = input.int(70, "RSI Overbought", group="RSI")
+rsiOS  = input.int(30, "RSI Oversold",   group="RSI")
+
+//=====================================================
+// BSPR
+//=====================================================
+bsLong  = input.float(0.55, "BSPR Long Threshold",  group="BSPR", step=0.01)
+bsShort = input.float(0.45, "BSPR Short Threshold",  group="BSPR", step=0.01)
+
+//=====================================================
+// STATE
+//=====================================================
+var float entry        = na
+var float peakPrice    = na
+var int   pendingDir   = 0
+var int   pendingCount = 0
+
+//=====================================================
+// INDICATORS
+//=====================================================
+emaFast = ta.ema(close, fastLen)
+emaSlow = ta.ema(close, slowLen)
+
+[_, dir] = ta.supertrend(factor, atrLen)
+
+longTrend  = dir < 0
+shortTrend = dir > 0
+
+volOk = volume > ta.sma(volume, volLen)
+
+rsiVal    = ta.rsi(close, rsiLen)
+rsiLong   = rsiVal < rsiOS
+rsiShort  = rsiVal > rsiOB
+
+bull      = close > open ? volume : 0.0
+bear      = close < open ? volume : 0.0
+ratio     = bull / (bull + bear + 0.000001)
+bsLongOk  = ratio > bsLong
+bsShortOk = ratio < bsShort
+
+emaLong  = close > emaFast and close > emaSlow
+emaShort = close < emaFast and close < emaSlow
+
+//=====================================================
+// RAW SIGNALS
+//=====================================================
+longRaw =
+     longTrend and
+     (not useEMA  or emaLong)   and
+     (not useVOL  or volOk)     and
+     (not useRSI  or rsiLong)   and
+     (not useBSPR or bsLongOk)  and
+     timeOk
+
+shortRaw =
+     shortTrend and
+     (not useEMA  or emaShort)  and
+     (not useVOL  or volOk)     and
+     (not useRSI  or rsiShort)  and
+     (not useBSPR or bsShortOk) and
+     timeOk
+
+//=====================================================
+// CONFIRMATION ENGINE
+//=====================================================
+currentDir = longRaw ? 1 : shortRaw ? -1 : 0
+
+if currentDir != pendingDir
+    pendingDir   := currentDir
+    pendingCount := 0
+
+if currentDir != 0
+    pendingCount := pendingCount + 1
+else
+    pendingCount := 0
+
+confirmed = pendingCount >= confirmBarsNeeded and pendingDir != 0
+
+isFlat  = strategy.position_size == 0
+isLong  = strategy.position_size > 0
+isShort = strategy.position_size < 0
+
+newLong  = confirmed and pendingDir == 1  and not isLong
+newShort = confirmed and pendingDir == -1 and not isShort
+
+//=====================================================
+// ENTRIES
+//=====================================================
+if newLong
+    pendingDir   := 0
+    pendingCount := 0
+    entry        := close
+    peakPrice    := close
+    strategy.entry("Long", strategy.long)
+
+if newShort
+    pendingDir   := 0
+    pendingCount := 0
+    entry        := close
+    peakPrice    := close
+    strategy.entry("Short", strategy.short)
+
+//=====================================================
+// TRAILING TP — обновяване на peak
+//=====================================================
+if isLong and not na(peakPrice)
+    peakPrice := math.max(peakPrice, close)
+
+if isShort and not na(peakPrice)
+    peakPrice := math.min(peakPrice, close)
+
+//=====================================================
+// STOP LOSS
+//=====================================================
+longSLPrice  = not na(entry) ? entry * (1 - sl / 100) : na
+shortSLPrice = not na(entry) ? entry * (1 + sl / 100) : na
+
+longSL  = isLong  and not na(entry) and close <= longSLPrice
+shortSL = isShort and not na(entry) and close >= shortSLPrice
+
+if longSL
+    entry     := na
+    peakPrice := na
+    strategy.close("Long", comment="SL")
+
+if shortSL
+    entry     := na
+    peakPrice := na
+    strategy.close("Short", comment="SL")
+
+//=====================================================
+// TRAILING TAKE PROFIT
+//=====================================================
+longTrailExitPrice  = not na(peakPrice) ? peakPrice * (1 - trailOffset / 100) : na
+shortTrailExitPrice = not na(peakPrice) ? peakPrice * (1 + trailOffset / 100) : na
+
+longTrailHit  = useTrailTP and isLong  and not na(peakPrice) and not na(entry) and
+     peakPrice >= entry * (1 + trailAct / 100) and
+     close     <= longTrailExitPrice
+
+shortTrailHit = useTrailTP and isShort and not na(peakPrice) and not na(entry) and
+     peakPrice <= entry * (1 - trailAct / 100) and
+     close     >= shortTrailExitPrice
+
+if longTrailHit
+    entry     := na
+    peakPrice := na
+    strategy.close("Long", comment="TrailTP")
+
+if shortTrailHit
+    entry     := na
+    peakPrice := na
+    strategy.close("Short", comment="TrailTP")
+
+//=====================================================
+// ALERTS
+//=====================================================
+alertcondition(newLong  and not isShort, "Open Long",     '{"action":"OPEN_LONG"}')
+alertcondition(newShort and not isLong,  "Open Short",    '{"action":"OPEN_SHORT"}')
+alertcondition(newLong  and isShort,     "Flip to Long",  '{"action":"FLIP_TO_LONG"}')
+alertcondition(newShort and isLong,      "Flip to Short", '{"action":"FLIP_TO_SHORT"}')
+alertcondition(longSL,                   "Stop Long",     '{"action":"STOP_LONG"}')
+alertcondition(shortSL,                  "Stop Short",    '{"action":"STOP_SHORT"}')
+alertcondition(longTrailHit,             "Trail TP Long", '{"action":"TRAIL_TP_LONG"}')
+alertcondition(shortTrailHit,            "Trail TP Short",'{"action":"TRAIL_TP_SHORT"}')
+
+//=====================================================
+// ВИЗУАЛИЗАЦИЯ
+//=====================================================
+plotshape(newLong,  location=location.belowbar, color=color.green, style=shape.triangleup,   size=size.small)
+plotshape(newShort, location=location.abovebar, color=color.red,   style=shape.triangledown, size=size.small)
+
+plot(newLong  ? close : na, "Long Entry",      color=color.green,                style=plot.style_circles, linewidth=5)
+plot(newShort ? close : na, "Short Entry",     color=color.red,                  style=plot.style_circles, linewidth=5)
+
+plot(longSL  ? longSLPrice  : na, "Long SL",  color=color.orange,               style=plot.style_circles, linewidth=4)
+plot(shortSL ? shortSLPrice : na, "Short SL", color=color.orange,               style=plot.style_circles, linewidth=4)
+
+plot(longTrailHit  ? longTrailExitPrice  : na, "Long Trail Exit",  color=color.new(color.green, 30), style=plot.style_circles, linewidth=4)
+plot(shortTrailHit ? shortTrailExitPrice : na, "Short Trail Exit", color=color.new(color.red,   30), style=plot.style_circles, linewidth=4)

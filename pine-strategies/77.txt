@@ -1,0 +1,60 @@
+//@version=6
+indicator(title="Bitget BB Breakout Indicator [Upgraded]", shorttitle="BB-Bitget", overlay=true)
+
+// === BACKTEST RANGE ===
+fromDate = input.time(timestamp("2024-01-01 00:00 +0000"), "From Date")
+toDate   = input.time(timestamp("2030-01-01 00:00 +0000"), "To Date")
+inDateRange = time >= fromDate and time <= toDate
+
+// === BOLLINGER BAND SETTINGS ===
+length = input.int(100, title = "BB Length", minval = 1)
+mult   = input.float(1.5, title = "BB StdDev", step = 0.1)
+
+basis  = ta.ema(close, length)
+dev    = mult * ta.stdev(close, length)
+upper  = basis + dev
+lower  = basis - dev
+
+// === EMA & SAR FILTERS ===
+useEMA      = input.bool(true, title = "Enable EMA Filter")
+emaPeriod   = input.int(100, title = "EMA Period")
+ema         = ta.ema(close, emaPeriod)
+
+useSAR      = input.bool(true, title = "Enable Parabolic SAR")
+sarStart    = input.float(0.1, title = "SAR Start", step = 0.1)
+sarStep     = input.float(0.3, title = "SAR Step", step = 0.1)
+sarMax      = input.float(1.0, title = "SAR Max", step = 0.1)
+sar         = ta.sar(sarStart * 0.01, sarStep * 0.01, sarMax * 0.1)
+
+// === STRATEGY CONTROLS ===
+sl_percent  = input.float(1.0, title = "Stop-Loss %", step = 0.001)
+tp_enabled  = input.bool(false, title = "Enable Take-Profit")
+tp_percent  = input.float(2.0, title = "Take-Profit %", step = 0.1)
+reversible  = input.bool(true, title = "Reversible Mode (TP + Opposite Signal Entry)")
+
+// === POSITION MANAGEMENT LOGIC ===
+// Long condition: price crosses above upper BB and EMA < upper BB
+longCondition  = ema < upper and close > upper
+// Short condition: price crosses below lower BB and EMA > lower BB
+shortCondition = ema > lower and close < lower
+
+// Restrict signals to user date range
+longSignal  = longCondition and inDateRange
+shortSignal = shortCondition and inDateRange
+
+// === PLOTS ===
+plot(basis, title = "BB Basis", color = color.orange)
+plot(upper, title = "BB Upper", color = color.blue)
+plot(lower, title = "BB Lower", color = color.blue)
+plot(useEMA ? ema : na, title = "EMA", color = color.green)
+plot(useSAR ? sar : na, title = "Parabolic SAR", style = plot.style_cross, color = color.red)
+
+// === ALERT CONDITIONS ===
+// Buy Long Alert
+alertcondition(longSignal, title="Buy Long Signal", message='{"action":"buy_long","price":{{close}},"strategy":"BB-Bitget"}')
+// Sell Short Alert
+alertcondition(shortSignal, title="Sell Short Signal", message='{"action":"sell_short","price":{{close}},"strategy":"BB-Bitget"}')
+
+// Optional plotshape signals on chart
+plotshape(longSignal, title="Buy Long", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small, text="Buy")
+plotshape(shortSignal, title="Sell Short", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small, text="Sell")

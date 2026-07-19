@@ -1,0 +1,40 @@
+//@version=5
+// this code uses the Linear Regression Bull and Bear Power indicator created by RicardoSantos
+// and adds a signal line 
+// Use : if signal line is changes color, you have your signal, green = buy, red = sell
+// Advice : best used with a zero lag indicator like ZeroLagEMA_LB from LazyBear
+// if price is above ZLEMA and signal = green => buy, price below ZLEMA and signal = red => sell
+// ***** Changelog compared to v01 ******
+// Adapted formula to calculate the signal in case there is no information for either bear or bull
+// Added the possibility to smoothen the signal (this is done by a simple SMA)
+// Added zero line
+indicator(title='[RS][NM]Improved Linear Regression Bull and Bear Power v02', shorttitle='BBP_NM_v02', overlay=false)
+window = input(title='Lookback Window:', defval=10)
+smooth = input(title='Smooth ?', defval=true)
+smap = input.int(title='Smooth factor', defval=5, minval=2, maxval=10)
+sigma = input(title='Sigma', defval=6)
+
+
+f_exp_lr(_height, _length) =>
+    _ret = _height + _height / _length
+    _ret
+
+h_value = ta.highest(close, window)
+l_value = ta.lowest(close, window)
+
+h_bar = bar_index - ta.highestbars(close, window)
+l_bar = bar_index - ta.lowestbars(close, window)
+
+f_exp_lr__1 = f_exp_lr(h_value - close, bar_index - h_bar)
+bear = 0 - (f_exp_lr(h_value - close, bar_index - h_bar) > 0 ? f_exp_lr__1 : 0)
+f_exp_lr__2 = f_exp_lr(close - l_value, bar_index - l_bar)
+bull = 0 + (f_exp_lr(close - l_value, bar_index - l_bar) > 0 ? f_exp_lr__2 : 0)
+alma_1 = ta.alma(bull + bear, smap, 0.9, sigma)
+direction = smooth ? alma_1 : bull * 3 + bear * 3
+dcolor = smooth ? direction[0] > direction[1] ? color.green : direction[0] < direction[1] ? color.red : color.yellow : direction > bull ? color.green : direction < bear ? color.red : color.yellow
+
+plot(title='Bear', series=bear, style=plot.style_columns, color=color.new(color.maroon, 92))
+plot(title='Bull', series=bull, style=plot.style_columns, color=color.new(color.green, 92))
+plot(title='Direction', series=direction, style=plot.style_line, linewidth=3, color=dcolor)
+plot(0, title='zero line', color=color.new(color.black, 0), linewidth=2)
+

@@ -1,0 +1,78 @@
+//@version=6
+strategy("Line Break Chart Strategy - Backtest Fix", shorttitle = "LBC-Backtest", overlay=true, max_lines_count = 500)
+
+// **🔹 Inputs**
+nol = input.int(defval = 3, title = "Number of Lines", minval = 1)
+totalbars = input.int(defval = 1000, title = "Maximum Number of Bars for Backtest", minval = 100, step = 100)
+
+// **Backtest Start Date** 🕒
+backtestStartYear = input.int(2025, title="Backtest Start Year") 
+backtestStartMonth = input.int(1, title="Backtest Start Month")
+backtestStartDay = input.int(1, title="Backtest Start Day")
+backtestStartTime = timestamp(backtestStartYear, backtestStartMonth, backtestStartDay, 0, 0)
+
+// **Risk Management & Stop-Loss**
+riskmanagement = input.bool(defval = true, title = "Risk Management")
+maximumrisk = input.float(defval = 1.5, title = "Max Risk %", minval = 0.1, step = 0.1) / 100
+stoplossATR = input.bool(defval = true, title = "Use ATR for Stop-Loss")
+atrMultiplier = input.float(defval = 2.0, title = "ATR Multiplier for Stop-Loss", minval = 0.1, step = 0.1)
+useFixedSL = input.bool(defval = false, title = "Use Fixed Stop-Loss")
+fixedSL = input.float(defval = 0.005, title = "Fixed Stop-Loss Distance", minval = 0.001, step = 0.001)
+
+// **Colors**
+uptcol = input.color(defval = color.lime, title = "Uptrend Color")
+dntcol = input.color(defval = color.red, title = "Downtrend Color")
+
+// **🔹 Trend Calculation**
+var int trend = na
+var float trendlevel = na
+trend := close >= open ? 1 : -1
+trendlevel := trend == 1 ? low : high
+
+// **📏 Stop-Loss Calculation**
+atrValue = ta.atr(14)
+var float stopLossLevelLong = na
+var float stopLossLevelShort = na
+
+stopLossLevelLong := stoplossATR ? close - atrMultiplier * atrValue : na
+stopLossLevelShort := stoplossATR ? close + atrMultiplier * atrValue : na
+
+stopLossLevelLong := useFixedSL ? close - fixedSL : stopLossLevelLong
+stopLossLevelShort := useFixedSL ? close + fixedSL : stopLossLevelShort
+
+// **🔁 Strategy Logic (Reversal on Stop-Loss Only)**
+var bool inLong = false
+var bool inShort = false
+
+if time >= backtestStartTime
+    // Reverse to Short if Long SL hit
+    if inLong and low <= stopLossLevelLong
+        strategy.close("Long")
+        strategy.entry("Short", strategy.short)
+        inLong := false
+        inShort := true
+
+    // Reverse to Long if Short SL hit
+    else if inShort and high >= stopLossLevelShort
+        strategy.close("Short")
+        strategy.entry("Long", strategy.long)
+        inShort := false
+        inLong := true
+
+    // Initial Entry: only once based on trend
+    else if not inLong and not inShort
+        if trend == 1
+            strategy.entry("Long", strategy.long)
+            inLong := true
+        else
+            strategy.entry("Short", strategy.short)
+            inShort := true
+
+// **📊 Plots**
+plot(trendlevel, title="Trend Level", color=trend == 1 ? uptcol : dntcol, linewidth=2)
+plot(inLong ? stopLossLevelLong : na, title="Stop-Loss Long", color=color.orange, linewidth=2)
+plot(inShort ? stopLossLevelShort : na, title="Stop-Loss Short", color=color.purple, linewidth=2)
+
+// **📍 Entry Labels**
+plotshape(series=time >= backtestStartTime and trend == 1 and not inLong and not inShort, title="Init Long", location=location.belowbar, style=shape.labelup, color=color.lime, text="Long")
+plotshape(series=time >= backtestStartTime and trend == -1 and not inLong and not inShort, title="Init Short", location=location.abovebar, style=shape.labeldown, color=color.red, text="Short")

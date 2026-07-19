@@ -1,0 +1,65 @@
+//@version=5
+strategy("Pivot Point Strategy with Reversal and Divergence", overlay=true)
+
+// Timing settings
+FromMonth = input.int(defval=9, title='From Month', minval=1, maxval=12)
+FromDay = input.int(defval=1, title='From Day', minval=1, maxval=31)
+FromYear = input.int(defval=2018, title='From Year', minval=999)
+ToMonth = input.int(defval=1, title='To Month', minval=1, maxval=12)
+ToDay = input.int(defval=1, title='To Day', minval=1, maxval=31)
+ToYear = input.int(defval=9999, title='To Year', minval=999)
+start = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+window() =>
+    time >= start and time <= finish ? true : false
+
+// Indicator settings
+prd = input.int(5, "Pivot Period", minval=1, maxval=50)
+source = input.string("Close", "Source for Pivot Points", options=["Close", "High/Low"])
+searchdiv = input.string("Regular", "Divergence Type", options=["Regular", "Hidden", "Regular/Hidden"])
+showindis = input.string("Full", "Show Indicator Names", options=["Full", "First Letter", "Don't Show"])
+showlimit = input.int(1, "Minimum Number of Divergence", minval=1, maxval=11)
+maxpp = input.int(10, "Maximum Pivot Points to Check", minval=1, maxval=20)
+maxbars = input.int(100, "Maximum Bars to Check", minval=30, maxval=200)
+shownum = input(true, "Show Divergence Number")
+showlast = input(false, "Show Only Last Divergence")
+dontconfirm = input(false, "Don't Wait for Confirmation")
+showlines = input(true, "Show Divergence Lines")
+showpivot = input(true, "Show Pivot Points")
+stopLossPercent = input.float(1.0, "Stop-Loss (%)", minval=0.1, maxval=10.0)
+
+// Technical indicators
+[macdLine, signalLine, _] = ta.macd(close, 12, 26, 9)
+rsi = ta.rsi(close, 14)
+
+// Determine the series to use for pivot points based on user selection
+pivotSeries = source == "Close" ? close : high
+
+// Calculate pivot points
+pivotHigh = ta.pivothigh(pivotSeries, prd, prd)
+pivotLow = ta.pivotlow(pivotSeries, prd, prd)
+
+// Convert pivot point detection to boolean for plotting
+bool phExists = not na(pivotHigh)
+bool plExists = not na(pivotLow)
+
+// Display pivot points if enabled and exist
+plotshape(series=phExists and showpivot and window(), style=shape.triangledown, location=location.abovebar, color=color.red, title="Pivot High")
+plotshape(series=plExists and showpivot and window(), style=shape.triangleup, location=location.belowbar, color=color.green, title="Pivot Low")
+
+var float lastBuyPrice = na
+var float lastSellPrice = na
+
+// Trading logic
+if window()
+    if plExists
+        strategy.close_all(comment="Close Sell on Buy Signal")
+        strategy.entry("Buy", strategy.long, comment="Buy at Pivot Low")
+        lastBuyPrice := close
+        strategy.exit("Stop Loss for Buy", "Buy", stop=lastBuyPrice * (1 - stopLossPercent / 100))
+
+    if phExists
+        strategy.close_all(comment="Close Buy on Sell Signal")
+        strategy.entry("Sell", strategy.short, comment="Sell at Pivot High")
+        lastSellPrice := close
+        strategy.exit("Stop Loss for Sell", "Sell", stop=lastSellPrice * (1 + stopLossPercent / 100))

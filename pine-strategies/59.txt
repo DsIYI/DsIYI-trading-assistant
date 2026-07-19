@@ -1,0 +1,114 @@
+//@version=6
+indicator('[SHK] STC MTF Dashboard Fixed', overlay=true)
+
+symbol = input.symbol("BTCUSDT", title="Symbol to Analyze")
+length = input.int(12, title='STC Length')
+fastLength = input.int(26, title='Fast EMA Length')
+slowLength = input.int(50, title='Slow EMA Length')
+smoothing = input.float(0.5, title='Smoothing Factor')
+lowerThresh = input.int(25, title='Lower Threshold')
+upperThresh = input.int(75, title='Upper Threshold')
+modeChoice = input.string("Color Flip", title="Alert Mode", options=["Color Flip", "Threshold Confirmed"])
+
+// === STC FUNCTION ===
+stcFunc(src, len, fastLen, slowLen, smooth) =>
+    macd = ta.ema(src, fastLen) - ta.ema(src, slowLen)
+    ll1 = ta.lowest(macd, len)
+    hh1 = ta.highest(macd, len)
+    k = hh1 - ll1 > 0 ? (macd - ll1) / (hh1 - ll1) * 100 : 0.0
+    k_smooth = 0.0
+    k_smooth := na(k_smooth[1]) ? k : k_smooth[1] + smooth * (k - k_smooth[1])
+    ll2 = ta.lowest(k_smooth, len)
+    hh2 = ta.highest(k_smooth, len)
+    d = hh2 - ll2 > 0 ? (k_smooth - ll2) / (hh2 - ll2) * 100 : 0.0
+    d_smooth = 0.0
+    d_smooth := na(d_smooth[1]) ? d : d_smooth[1] + smooth * (d - d_smooth[1])
+    d_smooth
+
+// === Timeframes ===
+tf1 = input.timeframe("1", title="1 Minute Timeframe")
+tf2 = input.timeframe("2", title="2 Minute Timeframe")
+tf3 = input.timeframe("3", title="3 Minute Timeframe")
+tf4 = input.timeframe("5", title="5 Minute Timeframe")
+tf5 = input.timeframe("15", title="15 Minute Timeframe")
+tf6 = input.timeframe("30", title="30 Minute Timeframe")
+tf7 = input.timeframe("60", title="1 Hour Timeframe")
+tf8 = input.timeframe("120", title="2 Hour Timeframe")
+tf9 = input.timeframe("240", title="4 Hour Timeframe")
+tf10 = input.timeframe("360", title="6 Hour Timeframe")
+
+// === Table ===
+var table dash = table.new(position.top_right, 2, 10)
+
+// === Timeframe Loop ===
+stc1_1m = request.security(symbol, tf1, stcFunc(close, length, fastLength, slowLength, smoothing))
+stc1_1m_prev = request.security(symbol, tf1, stcFunc(close, length, fastLength, slowLength, smoothing)[1])
+stc2_1m = stc1_1m_prev < stc1_1m
+
+stc1_2m = request.security(symbol, tf2, stcFunc(close, length, fastLength, slowLength, smoothing))
+stc1_2m_prev = request.security(symbol, tf2, stcFunc(close, length, fastLength, slowLength, smoothing)[1])
+stc2_2m = stc1_2m_prev < stc1_2m
+
+stc1_3m = request.security(symbol, tf3, stcFunc(close, length, fastLength, slowLength, smoothing))
+stc1_3m_prev = request.security(symbol, tf3, stcFunc(close, length, fastLength, slowLength, smoothing)[1])
+stc2_3m = stc1_3m_prev < stc1_3m
+
+stc1_5m = request.security(symbol, tf4, stcFunc(close, length, fastLength, slowLength, smoothing))
+stc1_5m_prev = request.security(symbol, tf4, stcFunc(close, length, fastLength, slowLength, smoothing)[1])
+stc2_5m = stc1_5m_prev < stc1_5m
+
+stc1_15m = request.security(symbol, tf5, stcFunc(close, length, fastLength, slowLength, smoothing))
+stc1_15m_prev = request.security(symbol, tf5, stcFunc(close, length, fastLength, slowLength, smoothing)[1])
+stc2_15m = stc1_15m_prev < stc1_15m
+
+stc1_30m = request.security(symbol, tf6, stcFunc(close, length, fastLength, slowLength, smoothing))
+stc1_30m_prev = request.security(symbol, tf6, stcFunc(close, length, fastLength, slowLength, smoothing)[1])
+stc2_30m = stc1_30m_prev < stc1_30m
+
+stc1_1h = request.security(symbol, tf7, stcFunc(close, length, fastLength, slowLength, smoothing))
+stc1_1h_prev = request.security(symbol, tf7, stcFunc(close, length, fastLength, slowLength, smoothing)[1])
+stc2_1h = stc1_1h_prev < stc1_1h
+
+stc1_2h = request.security(symbol, tf8, stcFunc(close, length, fastLength, slowLength, smoothing))
+stc1_2h_prev = request.security(symbol, tf8, stcFunc(close, length, fastLength, slowLength, smoothing)[1])
+stc2_2h = stc1_2h_prev < stc1_2h
+
+stc1_4h = request.security(symbol, tf9, stcFunc(close, length, fastLength, slowLength, smoothing))
+stc1_4h_prev = request.security(symbol, tf9, stcFunc(close, length, fastLength, slowLength, smoothing)[1])
+stc2_4h = stc1_4h_prev < stc1_4h
+
+stc1_6h = request.security(symbol, tf10, stcFunc(close, length, fastLength, slowLength, smoothing))
+stc1_6h_prev = request.security(symbol, tf10, stcFunc(close, length, fastLength, slowLength, smoothing)[1])
+stc2_6h = stc1_6h_prev < stc1_6h
+
+// === Table Rendering ===
+table.cell(dash, 0, 0, "1m", bgcolor=color.black, text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 0, stc2_1m ? "BUY" : "SELL", bgcolor=stc2_1m ? color.green : color.red, text_color=color.white, text_size=size.small)
+
+table.cell(dash, 0, 1, "2m", bgcolor=color.black, text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 1, stc2_2m ? "BUY" : "SELL", bgcolor=stc2_2m ? color.green : color.red, text_color=color.white, text_size=size.small)
+
+table.cell(dash, 0, 2, "3m", bgcolor=color.black, text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 2, stc2_3m ? "BUY" : "SELL", bgcolor=stc2_3m ? color.green : color.red, text_color=color.white, text_size=size.small)
+
+table.cell(dash, 0, 3, "5m", bgcolor=color.black, text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 3, stc2_5m ? "BUY" : "SELL", bgcolor=stc2_5m ? color.green : color.red, text_color=color.white, text_size=size.small)
+
+table.cell(dash, 0, 4, "15m", bgcolor=color.black, text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 4, stc2_15m ? "BUY" : "SELL", bgcolor=stc2_15m ? color.green : color.red, text_color=color.white, text_size=size.small)
+
+table.cell(dash, 0, 5, "30m", bgcolor=color.black, text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 5, stc2_30m ? "BUY" : "SELL", bgcolor=stc2_30m ? color.green : color.red, text_color=color.white, text_size=size.small)
+
+table.cell(dash, 0, 6, "1h", bgcolor=color.black, text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 6, stc2_1h ? "BUY" : "SELL", bgcolor=stc2_1h ? color.green : color.red, text_color=color.white, text_size=size.small)
+
+table.cell(dash, 0, 7, "2h", bgcolor=color.black, text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 7, stc2_2h ? "BUY" : "SELL", bgcolor=stc2_2h ? color.green : color.red, text_color=color.white, text_size=size.small)
+
+table.cell(dash, 0, 8, "4h", bgcolor=color.black, text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 8, stc2_4h ? "BUY" : "SELL", bgcolor=stc2_4h ? color.green : color.red, text_color=color.white, text_size=size.small)
+
+table.cell(dash, 0, 9, "6h", bgcolor=color.black, text_color=color.white, text_size=size.small)
+table.cell(dash, 1, 9, stc2_6h ? "BUY" : "SELL", bgcolor=stc2_6h ? color.green : color.red, text_color=color.white, text_size=size.small)
+

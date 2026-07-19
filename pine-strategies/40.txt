@@ -1,0 +1,85 @@
+//@version=6
+strategy("Line Break Chart Strategy", shorttitle = "LBC", max_boxes_count = 500, max_bars_back = 4000, max_lines_count = 500)
+
+// === INPUTS ===
+nol = input.int(defval = 3, title = "Number of Lines", minval = 1, tooltip = "Number of the Line to check for the reversal")
+totalbars = input.int(defval = 30000, title = "Maximum Number of the Bars", minval = 10, step = 500, tooltip = "Total number of the bars to create Line Break Chart")
+overlay = input.bool(defval = false, title = "Show in the Main Chart")
+gap = input.string(defval = "Off", title = "Gaps", options =["Off", "On"])
+
+// Trend Colors
+showTrend = input.bool(defval = true, title = "Trend", inline = "shwt")
+uptcol = input.color(defval = color.lime, title = "", inline = "shwt")
+dntcol = input.color(defval = color.red, title = "", inline = "shwt")
+trendwidth = input.int(defval = 2, title = "", minval = 1, maxval = 5, inline = "shwt")
+
+// === STRATEGY INPUTS ===
+riskmanagement = input.bool(defval = false, title = "Risk Management")
+maximumrisk = input.float(defval = 1.0, title = "  Maximum Risk %", minval = 0, step = 0.1) / 100
+
+// === TIME RANGE FILTER ===
+fromYear = input.int(2022, "From Year", inline = "from")
+fromMonth = input.int(1, "Month", inline = "from")
+fromDay = input.int(1, "Day", inline = "from")
+toYear = input.int(2025, "To Year", inline = "to")
+toMonth = input.int(12, "Month", inline = "to")
+toDay = input.int(31, "Day", inline = "to")
+
+// === TIME FILTER FUNCTION ===
+startDate = timestamp(fromYear, fromMonth, fromDay, 0, 0)
+endDate = timestamp(toYear, toMonth, toDay, 23, 59)
+isInDateRange = (time >= startDate and time <= endDate)
+
+// === LOGIC IMPLEMENTATION ===
+var trend = close >= open ? 1 : -1
+var closes = array.new_float(500, close)
+var opens = array.new_float(500, open)
+var counts = array.new_int(500, 0)
+var count = 0
+var trcount = 1
+var firstone = true
+
+if bar_index >= last_bar_index - totalbars and isInDateRange and (not barstate.isrealtime or barstate.isconfirmed)
+    if bar_index == last_bar_index - totalbars
+        trend := close >= open ? 1 : -1
+        count := 0
+        trcount := 1
+        closes.fill(close)
+        opens.fill(open)
+
+    count += 1
+
+    if trend == 1
+        if close < math.min(array.min(array.slice(opens, 0, nol)), array.min(array.slice(closes, 0, nol)))
+            trend := -1
+            trcount := 0
+        if close > closes.get(0) or trend == -1
+            opens.unshift(trend == -1 ? opens.get(0) : closes.get(0))
+            closes.unshift(close)
+            counts.unshift(count)
+            count := 0
+            trcount += 1
+    else if trend == -1
+        if close > math.max(array.max(array.slice(opens, 0, nol)), array.max(array.slice(closes, 0, nol)))
+            trend := 1
+            trcount := 0
+        if close < closes.get(0) or trend == 1
+            opens.unshift(trend == 1 ? opens.get(0) : closes.get(0))
+            closes.unshift(close)
+            counts.unshift(count)
+            count := 0
+            trcount += 1
+
+// === STRATEGY ORDERS ===
+if isInDateRange
+    if trend == 1 and trend[1] == -1
+        strategy.entry("Buy Long", strategy.long)
+    if trend == -1 and trend[1] == 1
+        strategy.entry("Buy Short", strategy.short)
+
+    // Optional risk-based exit (example using a fixed stop-loss logic)
+    if riskmanagement
+        slLong = close * (1 - maximumrisk)
+        slShort = close * (1 + maximumrisk)
+        strategy.exit("SL", from_entry = "Buy Long", stop = slLong)
+        strategy.exit("SL", from_entry = "Buy Short", stop = slShort)

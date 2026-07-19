@@ -1,0 +1,217 @@
+//@version=6
+strategy(
+     "Line Break Strategy Improved",
+     shorttitle = "LBC-PRO",
+     overlay = false,
+     calc_on_every_tick = true,
+     pyramiding = 0,
+     max_bars_back = 4000
+)
+
+//=========================
+// DATE FILTER
+//=========================
+
+FromMonth = input.int(4,"From Month",minval=1,maxval=12)
+FromDay   = input.int(17,"From Day",minval=1,maxval=31)
+FromYear  = input.int(2024,"From Year")
+
+ToMonth   = input.int(1,"To Month",minval=1,maxval=12)
+ToDay     = input.int(1,"To Day",minval=1,maxval=31)
+ToYear    = input.int(9999,"To Year")
+
+inWindow =
+     time >= timestamp(FromYear,FromMonth,FromDay,0,0) and
+     time <= timestamp(ToYear,ToMonth,ToDay,23,59)
+
+//=========================
+// INPUTS
+//=========================
+
+nol = input.int(3,"Number Of Lines",minval=1,maxval=20)
+
+atrLen = input.int(14,"ATR Length")
+atrMult = input.float(2.0,"ATR Multiplier",step=0.1)
+
+showTrend = input.bool(true,"Show Trend")
+
+uptcol = input.color(color.lime,"Uptrend Color")
+dntcol = input.color(color.red,"Downtrend Color")
+
+trendwidth = input.int(2,"Trend Width")
+
+flipflop = input.bool(true,"Avoid Flip Flops")
+
+trendConfirmationBars =
+     input.int(3,"Min Trend Bars",minval=1)
+
+riskmanagement =
+     input.bool(false,"Risk Management")
+
+maximumrisk =
+     input.float(1.0,"Maximum Risk %",step=0.1)/100
+
+timeframeSetting =
+     input.string(
+         "1",
+         "MTF Filter",
+         options=["1","2","3","5","15","30","60","120","240","360"]
+     )
+
+//=========================
+// MTF FILTER
+//=========================
+
+price =
+ request.security(
+     syminfo.tickerid,
+     timeframeSetting,
+     close
+ )
+
+emaMTF =
+ request.security(
+     syminfo.tickerid,
+     timeframeSetting,
+     ta.ema(close,20)
+ )
+
+mtfBull = price > emaMTF
+mtfBear = price < emaMTF
+
+//=========================
+// RENKO ENGINE
+//=========================
+
+var float renkoClose = na
+var float renkoOpen = na
+
+if na(renkoClose)
+    renkoClose := close
+
+brickSize = ta.atr(atrLen) * atrMult
+
+while close >= renkoClose + brickSize
+    renkoOpen := renkoClose
+    renkoClose += brickSize
+
+while close <= renkoClose - brickSize
+    renkoOpen := renkoClose
+    renkoClose -= brickSize
+
+//=========================
+// LINE BREAK LOGIC
+//=========================
+
+highestLine =
+ ta.highest(renkoClose[1], nol)
+
+lowestLine =
+ ta.lowest(renkoClose[1], nol)
+
+var int trend = 0
+
+if renkoClose > highestLine
+    trend := 1
+
+if renkoClose < lowestLine
+    trend := -1
+
+//=========================
+// TREND COUNTER
+//=========================
+
+var int trendBars = 0
+
+if trend == trend[1]
+    trendBars += 1
+else
+    trendBars := 1
+
+//=========================
+// FLIP FLOP FILTER
+//=========================
+
+flipFlopDetected =
+     trend != trend[1] and
+     trend[1] != trend[2]
+
+validTrade = true
+
+if flipflop and flipFlopDetected
+    validTrade := false
+
+if trendBars < trendConfirmationBars
+    validTrade := false
+
+//=========================
+// RISK FILTER
+//=========================
+
+entryRisk =
+ math.abs(open - renkoClose) / open
+
+if riskmanagement and entryRisk > maximumrisk
+    validTrade := false
+
+//=========================
+// SIGNALS
+//=========================
+
+longSignal =
+     trend == 1 and
+     trend[1] != 1 and
+     mtfBull
+
+shortSignal =
+     trend == -1 and
+     trend[1] != -1 and
+     mtfBear
+
+//=========================
+// ENTRIES
+//=========================
+
+if inWindow and validTrade
+
+    if longSignal
+        strategy.close("Short")
+        strategy.entry("Long",strategy.long)
+
+    if shortSignal
+        strategy.close("Long")
+        strategy.entry("Short",strategy.short)
+
+//=========================
+// ALERTS
+//=========================
+
+alertcondition(
+     longSignal,
+     "LONG",
+     "LONG"
+)
+
+alertcondition(
+     shortSignal,
+     "SHORT",
+     "SHORT"
+)
+
+//=========================
+// PLOTS
+//=========================
+
+plot(
+     showTrend ? renkoClose : na,
+     color = trend == 1 ? uptcol : dntcol,
+     linewidth = trendwidth,
+     title = "Renko Close"
+)
+
+plot(
+     showTrend ? renkoOpen : na,
+     color = trend == 1 ? uptcol : dntcol,
+     linewidth = trendwidth,
+     title = "Renko Open"
+)

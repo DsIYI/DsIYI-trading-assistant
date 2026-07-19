@@ -1,0 +1,52 @@
+//@version=5
+strategy("Pivot Points High Low Strategy", overlay=true)
+
+// Input groups for customization
+lengthGroupTitle = "LENGTH LEFT / RIGHT"
+colorGroupTitle = "Text Color / Label Color"
+tradingGroupTitle = "Trading Parameters"
+
+// Inputs for Pivot High
+leftLenH = input.int(title="Pivot High", defval=10, minval=1, inline="Pivot High", group=lengthGroupTitle)
+rightLenH = input.int(title="/", defval=10, minval=1, inline="Pivot High", group=lengthGroupTitle)
+textColorH = input.color(title="Pivot High", defval=color.black, inline="Pivot High", group=colorGroupTitle)
+labelColorH = input.color(title="", defval=color.white, inline="Pivot High", group=colorGroupTitle)
+
+// Inputs for Pivot Low
+leftLenL = input.int(title="Pivot Low", defval=10, minval=1, inline="Pivot Low", group=lengthGroupTitle)
+rightLenL = input.int(title="/", defval=10, minval=1, inline="Pivot Low", group=lengthGroupTitle)
+textColorL = input.color(title="Pivot Low", defval=color.black, inline="Pivot Low", group=colorGroupTitle)
+labelColorL = input.color(title="", defval=color.white, inline="Pivot Low", group=colorGroupTitle)
+
+// Trading parameters
+trailPercent = input.float(title="Trailing Take-Profit (%)", defval=1.0, minval=0.1, step=0.1, group=tradingGroupTitle)
+stopLossPercent = input.float(title="Stop-Loss (%)", defval=2.0, minval=0.1, step=0.1, group=tradingGroupTitle)
+startHour = input.int(title="Start Hour (24h format)", defval=0, minval=0, maxval=23, group=tradingGroupTitle)
+endHour = input.int(title="End Hour (24h format)", defval=23, minval=0, maxval=23, group=tradingGroupTitle)
+
+// Calculate pivot points
+ph = ta.pivothigh(leftLenH, rightLenH)
+pl = ta.pivotlow(leftLenL, rightLenL)
+
+// Define trailing stop and stop loss
+trailOffset = trailPercent / 100 * close
+stopLossOffset = stopLossPercent / 100 * close
+
+// Check if within trading hours
+isTradingHour = (hour >= startHour) and (hour <= endHour)
+
+// Strategy logic
+if isTradingHour
+    // Buy order at pivot low
+    if not na(pl) and close > pl
+        label.new(bar_index[rightLenL], pl, str.tostring(pl, format.mintick), style=label.style_label_up, color=labelColorL, textcolor=textColorL)
+        strategy.entry("Buy", strategy.long, stop=pl, oca_name="pivot_trade", oca_type=strategy.oca.cancel)
+        strategy.exit("Sell", from_entry="Buy", trail_offset=trailOffset, stop=pl - stopLossOffset)
+        label.new(bar_index, pl, "Buy Order", style=label.style_label_up, color=color.green, textcolor=color.white)
+    
+    // Sell order at pivot high
+    if not na(ph) and close < ph
+        label.new(bar_index[rightLenH], ph, str.tostring(ph, format.mintick), style=label.style_label_down, color=labelColorH, textcolor=textColorH)
+        strategy.entry("Sell", strategy.short, stop=ph, oca_name="pivot_trade", oca_type=strategy.oca.cancel)
+        strategy.exit("Buy", from_entry="Sell", trail_offset=trailOffset, stop=ph + stopLossOffset)
+        label.new(bar_index, ph, "Sell Order", style=label.style_label_down, color=color.red, textcolor=color.white)

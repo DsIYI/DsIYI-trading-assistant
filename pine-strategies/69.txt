@@ -1,0 +1,142 @@
+//@version=5
+strategy("AI-2-1-Second Scalper • Fixed & Optimized • V7.0",
+     overlay=true,
+     max_bars_back=5000,
+     initial_capital=100,
+     default_qty_type=strategy.fixed,
+     default_qty_value=1,
+     commission_type=strategy.commission.percent,
+     commission_value=0.06,
+     pyramiding=0,
+     calc_on_every_tick=true)
+
+// ========== BACKTESTING PERIOD ==========
+useDateFilter = input.bool(true, title="Filter by Date Range", group="Backtesting Period")
+startTime = input.time(timestamp("01 Jan 2023 00:00 +0000"), title="Start Time", group="Backtesting Period")
+endTime = input.time(timestamp("01 Jan 2099 00:00 +0000"), title="End Time", group="Backtesting Period")
+inDateRange = (not useDateFilter) or (time >= startTime and time <= endTime)
+
+// ========== MANUAL POSITION SIZING ==========
+// Enter the fixed order quantity manually.
+orderQty = input.float(1.0, title="Order Quantity", step=0.01, group="Manual Settings")
+qty = orderQty
+
+// ========== SCALPING PARAMETERS ==========
+fastEMA_input = input.int(5, "Fast EMA (3-7 for scalping)", minval=1, maxval=20, group="Strategy Parameters")
+slowEMA_input = input.int(12, "Slow EMA (10-15 for scalping)", minval=5, maxval=30, group="Strategy Parameters")
+atrLen_input = input.int(10, "ATR Length (5-14 for scalping)", minval=3, maxval=20, group="Strategy Parameters")
+slATRmult   = input.float(1.2, "SL – ATR mult (1.0-1.5)", step=0.1, minval=0.001, maxval=3.0, group="Strategy Parameters")
+hardStop_pct = input.float(1.5, "Hard Stop % (1.5% for 30x)", step=0.1, minval=1.0, maxval=5.0, group="Strategy Parameters")
+tpRatio     = input.float(1.5, "TP/SL Ratio (1.5 recommended)", step=0.1, minval=1.0, maxval=3.0, group="Strategy Parameters")
+
+// ===== Trailing Stop & Partial Close Options =====
+enableTrailing = input.bool(false, title="Enable Trailing Stop", group="Strategy Parameters")
+trailATRmult = input.float(0.5, title="Trail ATR Mult", step=0.1, minval=0.1, maxval=3.0, group="Strategy Parameters")
+trailOffsetMultiplier = input.float(0.5, title="Trail Offset Multiplier", step=0.1, minval=0.1, maxval=3.0, group="Strategy Parameters")
+
+enablePartialClose = input.bool(false, title="Enable Partial Close", group="Strategy Parameters")
+partialClosePercent = input.float(50, title="Partial Close %", step=1.0, minval=1.0, maxval=100.0, group="Strategy Parameters")
+profitTargetForPartialClose = input.float(1.0, title="Profit Target % for Partial Close", step=0.1, minval=0.1, maxval=10.0, group="Strategy Parameters")
+
+// ========== TIMEFRAME-SPECIFIC ADJUSTMENTS ==========
+isSecondChart = timeframe.isseconds
+isMinuteChart = timeframe.isminutes
+fastEMA = isSecondChart ? 3 : isMinuteChart and timeframe.multiplier <= 5 ? 5 : fastEMA_input
+slowEMA = isSecondChart ? 7 : isMinuteChart and timeframe.multiplier <= 5 ? 12 : slowEMA_input
+atrLen  = isSecondChart ? 5 : isMinuteChart and timeframe.multiplier <= 5 ? 10 : atrLen_input
+
+// ========== INDICATORS ==========
+fEMA      = ta.ema(close, fastEMA)
+sEMA      = ta.ema(close, slowEMA)
+atr       = ta.atr(atrLen)
+rsi       = ta.rsi(close, 14)
+volumeAvg = ta.sma(volume, 20)
+pivotLookback   = 3
+recentPivotHigh = ta.pivothigh(high, pivotLookback, pivotLookback)
+recentPivotLow  = ta.pivotlow(low, pivotLookback, pivotLookback)
+nearPivotLow    = not na(recentPivotLow[pivotLookback]) and low <= recentPivotLow[pivotLookback] * 1.002
+nearPivotHigh   = not na(recentPivotHigh[pivotLookback]) and high >= recentPivotHigh[pivotLookback] * 0.998
+
+// ========== ENTRY SIGNALS ==========
+// No session or trading-hour filtering is applied; trading is allowed if the date filter condition is met.
+canTrade = true
+
+longSignalBase = ta.crossover(fEMA, sEMA) and rsi < 65 and rsi > 30
+shortSignalBase = ta.crossunder(fEMA, sEMA) and rsi > 35 and rsi < 70
+volumeFilter = volume > volumeAvg * 1.2
+longTrendFilter = fEMA > sEMA[1]
+shortTrendFilter = fEMA < sEMA[1]
+longSignal = longSignalBase and volumeFilter and nearPivotLow and canTrade and longTrendFilter and inDateRange
+shortSignal = shortSignalBase and volumeFilter and nearPivotHigh and canTrade and shortTrendFilter and inDateRange
+
+// ====== VISUAL SIGNALS ======
+plotshape(longSignal, title="Long Signal", location=location.belowbar, color=color.new(color.green, 0), style=shape.labelup, text="Buy", textcolor=color.white, size=size.tiny)
+plotshape(shortSignal, title="Short Signal", location=location.abovebar, color=color.new(color.red, 0), style=shape.labeldown, text="Sell", textcolor=color.white, size=size.tiny)
+
+// ========== SL/TP CALCULATIONS ==========
+stopDistance      = atr * slATRmult
+stopDistancePercent = (stopDistance / close) * 100
+actualStopPercent = math.min(stopDistancePercent, hardStop_pct)
+
+// ========== EXECUTION ==========
+var float entryStopPrice  = na
+var float entryTargetPrice = na
+
+if longSignal and strategy.position_size == 0
+    longStopPrice = close * (1 - actualStopPercent / 100)
+    longTargetPrice = close * (1 + actualStopPercent / 100 * tpRatio)
+    strategy.entry("Long", strategy.long, qty=qty)
+    if enableTrailing
+        strategy.exit("Long Exit", "Long", trail_points = atr * trailATRmult, trail_offset = atr * trailOffsetMultiplier)
+    else
+        strategy.exit("Long Exit", "Long", stop = longStopPrice, limit = longTargetPrice)
+    entryStopPrice  := longStopPrice
+    entryTargetPrice := longTargetPrice
+    if enablePartialClose
+        partialLongTarget = close * (1 + profitTargetForPartialClose / 100)
+        strategy.exit("Long Partial", "Long", limit = partialLongTarget, qty_percent = partialClosePercent)
+
+if shortSignal and strategy.position_size == 0
+    shortStopPrice = close * (1 + actualStopPercent / 100)
+    shortTargetPrice = close * (1 - actualStopPercent / 100 * tpRatio)
+    strategy.entry("Short", strategy.short, qty=qty)
+    if enableTrailing
+        strategy.exit("Short Exit", "Short", trail_points = atr * trailATRmult, trail_offset = atr * trailOffsetMultiplier)
+    else
+        strategy.exit("Short Exit", "Short", stop = shortStopPrice, limit = shortTargetPrice)
+    entryStopPrice  := shortStopPrice
+    entryTargetPrice := shortTargetPrice
+    if enablePartialClose
+        partialShortTarget = close * (1 - profitTargetForPartialClose / 100)
+        strategy.exit("Short Partial", "Short", limit = partialShortTarget, qty_percent = partialClosePercent)
+        
+// Reset entry exit prices if no active position
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    entryStopPrice  := na
+    entryTargetPrice := na
+
+// ========== PLOTTING ==========
+plot(fEMA, color = color.new(color.green, 0), title = "Fast EMA", linewidth = 2, trackprice = true)
+plot(sEMA, color = color.new(color.red, 0), title = "Slow EMA", linewidth = 2, trackprice = true)
+plotshape(recentPivotHigh, style = shape.triangledown, location = location.abovebar, color = color.red, size = size.tiny, title = "Pivot High", offset = -pivotLookback)
+plotshape(recentPivotLow, style = shape.triangleup, location = location.belowbar, color = color.green, size = size.tiny, title = "Pivot Low", offset = -pivotLookback)
+plot(strategy.position_size != 0 ? entryStopPrice : na, "Stop Loss", color = color.red, style = plot.style_linebr)
+plot(strategy.position_size != 0 ? entryTargetPrice : na, "Take Profit", color = color.green, style = plot.style_linebr)
+bgColorDate = inDateRange ? color.new(color.blue, 95) : na
+bgcolor(bgColorDate)
+bgColorSignal = longSignal ? color.new(color.green, 90) : shortSignal ? color.new(color.red, 90) : na
+bgcolor(bgColorSignal)
+
+// ========== INFO PANEL ==========
+var table infoTable = table.new(position.top_right, 2, 4, bgcolor = color.new(color.black, 80), border_width = 1)
+if barstate.islast
+    table.clear(infoTable, 0, 0, 1, 3)
+    status = strategy.position_size != 0 ? "IN POSITION" : "NO POSITION"
+    table.cell(infoTable, 0, 0, "Status:", text_color = color.white, text_size = size.small)
+    table.cell(infoTable, 1, 0, status, text_color = strategy.position_size != 0 ? (strategy.position_size > 0 ? color.green : color.red) : color.white, text_size = size.small)
+    table.cell(infoTable, 0, 1, "Entry Price:", text_color = color.white, text_size = size.small)
+    table.cell(infoTable, 1, 1, strategy.position_size != 0 ? str.tostring(strategy.position_avg_price, format.mintick) : "N/A", text_color = color.white, text_size = size.small)
+    table.cell(infoTable, 0, 2, "Stop Loss:", text_color = color.white, text_size = size.small)
+    table.cell(infoTable, 1, 2, strategy.position_size != 0 ? str.tostring(entryStopPrice, format.mintick) : "N/A", text_color = color.red, text_size = size.small)
+    table.cell(infoTable, 0, 3, "Take Profit:", text_color = color.white, text_size = size.small)
+    table.cell(infoTable, 1, 3, strategy.position_size != 0 ? str.tostring(entryTargetPrice, format.mintick) : "N/A", text_color = color.green, text_size = size.small)

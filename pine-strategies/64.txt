@@ -1,0 +1,63 @@
+//@version=5
+strategy("Non-Repainting Scalper", overlay=true, 
+         max_bars_back=5000, calc_on_every_tick=false)
+
+// Manual Backtest Period Inputs
+start_date = input.time(timestamp("2025-01-01 00:00"), "Backtest Start")
+end_date = input.time(timestamp("2029-12-31 23:59"), "Backtest End")
+in_backtest = time >= start_date and time <= end_date
+
+// HTF Toggle
+use_htf = input.bool(true, "Enable HTF Analysis")
+htf_timeframe = input.timeframe("5", "HTF Timeframe")
+
+// Position Sizing
+base_amount = input.float(100, "Base Amount ($)", minval=50, maxval=500)
+leverage = input.int(30, "Leverage", minval=1, maxval=50)
+
+// HTF data - using security() with lookahead disabled
+htf_close = request.security(syminfo.tickerid, htf_timeframe, close[1], lookahead=barmerge.lookahead_off)
+htf_ema_fast = request.security(syminfo.tickerid, htf_timeframe, ta.ema(close, 8)[1], lookahead=barmerge.lookahead_off)
+htf_ema_slow = request.security(syminfo.tickerid, htf_timeframe, ta.ema(close, 21)[1], lookahead=barmerge.lookahead_off)
+htf_trend = htf_ema_fast > htf_ema_slow
+
+// All calculations use [1] to avoid repainting
+rsi_fast = ta.rsi(close[1], 3)
+rsi_slow = ta.rsi(close[1], 14)
+ema_ultra_fast = ta.ema(close[1], 3)
+ema_fast = ta.ema(close[1], 8)
+volume_sma = ta.sma(volume[1], 10)
+volume_spike = volume[1] > volume_sma * 1.5
+
+// Price action confirmation
+price_above_ema = close[1] > ema_ultra_fast
+momentum_up = ema_ultra_fast > ema_fast
+
+// Long conditions
+long_condition = price_above_ema and momentum_up and rsi_fast < 70 and volume_spike
+long_htf_ok = use_htf ? htf_trend : true
+
+// Short conditions  
+short_condition = close[1] < ema_ultra_fast and ema_ultra_fast < ema_fast and rsi_fast > 30 and volume_spike
+short_htf_ok = use_htf ? not htf_trend : true
+
+// Final entries (only in backtest period)
+enter_long = long_condition and long_htf_ok and in_backtest and strategy.position_size == 0
+enter_short = short_condition and short_htf_ok and in_backtest and strategy.position_size == 0
+
+// Tight stops for 1-second scalping
+stop_loss_pct = 0.3  // 0.3% with 30x = 9% of account risk
+take_profit_pct = 0.6  // 2:1 RR
+
+if enter_long
+    strategy.entry("Long", strategy.long, qty=base_amount*leverage/close)
+    strategy.exit("Long Exit", "Long", 
+                  stop=close*(1-stop_loss_pct/100), 
+                  limit=close*(1+take_profit_pct/100))
+
+if enter_short
+    strategy.entry("Short", strategy.short, qty=base_amount*leverage/close)
+    strategy.exit("Short Exit", "Short", 
+                  stop=close*(1+stop_loss_pct/100), 
+                  limit=close*(1-take_profit_pct/100))
+

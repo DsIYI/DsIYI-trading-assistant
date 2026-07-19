@@ -1,0 +1,33 @@
+//@version=5
+strategy("Improved LRBB Power Strategy", shorttitle="ILRBBPS", overlay=true)
+
+// Inputs
+window = input(10, title="Lookback Window")
+smooth = input(true, title="Smooth?")
+smap = input.int(5, title="Smooth Factor", minval=2, maxval=10)
+sigma = input(6, title="Sigma")
+stopLossPct = input(1.5, title="Stop Loss (%)")
+stopLossFixed = input(0.0, title="Stop Loss (Fixed, 0 to disable)")
+
+// Linear Regression Bull and Bear Power calculations
+f_exp_lr(_height, _length) => _height + _height / _length
+h_value = ta.highest(close, window)
+l_value = ta.lowest(close, window)
+h_bar = bar_index - ta.highestbars(close, window)
+l_bar = bar_index - ta.lowestbars(close, window)
+bear = 0 - (f_exp_lr(h_value - close, h_bar) > 0 ? f_exp_lr(h_value - close, h_bar) : 0)
+bull = 0 + (f_exp_lr(close - l_value, l_bar) > 0 ? f_exp_lr(close - l_value, l_bar) : 0)
+direction = smooth ? ta.alma(bull + bear, smap, 0.85, sigma) : bull + bear
+
+// Signals
+longSignal = direction > 0
+shortSignal = direction < 0
+
+// Strategy Execution
+if (longSignal)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Stop Loss Long", "Long", loss=stopLossFixed)
+
+if (shortSignal)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Stop Loss Short", "Short", loss=stopLossFixed)

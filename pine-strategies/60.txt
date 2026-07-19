@@ -1,0 +1,159 @@
+//@version=5
+strategy('[SHK] STC Strategy NON-REPAINT', overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1, process_orders_on_close=true, pyramiding=0)
+
+// === STC PARAMETERS ===
+group1 = "═══════════ STC Settings ═══════════"
+length = input.int(12, title='STC Length', group=group1)
+fastLength = input.int(26, title='Fast EMA Length', group=group1)
+slowLength = input.int(50, title='Slow EMA Length', group=group1)
+smoothing = input.float(0.5, title='Smoothing Factor', group=group1)
+lowerThresh = input.int(25, title='Lower Threshold (Oversold)', group=group1)
+upperThresh = input.int(75, title='Upper Threshold (Overbought)', group=group1)
+
+// === STRATEGY SETTINGS ===
+group2 = "═══════════ Strategy Settings ═══════════"
+entryMode = input.string("Threshold Cross", title="Entry Mode", options=["Threshold Cross", "Direction Change"], group=group2)
+exitMode = input.string("Opposite Threshold", title="Exit Mode", options=["Opposite Signal", "Opposite Threshold", "Direction Change"], group=group2)
+confirmBars = input.int(1, "Confirmation Bars", minval=0, maxval=3, group=group2)
+
+// === FILTERS ===
+group3 = "═══════════ Filters ═══════════"
+useTrendFilter = input.bool(true, "Use Trend Filter", group=group3)
+trendMA = input.int(50, "Trend MA Length", group=group3)
+useVolumeFilter = input.bool(true, "Use Volume Filter", group=group3)
+volumeLength = input.int(20, "Volume MA Length", group=group3)
+volumeMult = input.float(1.5, "Volume Multiplier", minval=1.0, maxval=3.0, group=group3)
+
+// === RISK MANAGEMENT ===
+group4 = "═══════════ Risk Management ═══════════"
+useStopLoss = input.bool(true, title="Use Stop Loss", group=group4)
+stopLossPerc = input.float(2.0, title="Stop Loss %", minval=0.1, maxval=10, group=group4)
+useTakeProfit = input.bool(true, title="Use Take Profit", group=group4)
+takeProfitPerc = input.float(3.0, title="Take Profit %", minval=0.1, maxval=20, group=group4)
+
+// === TIME FILTER ===
+group5 = "═══════════ Backtest Period ═══════════"
+useTimeFilter = input.bool(true, title="Use Time Filter", group=group5)
+startDate = input.time(timestamp("2024-01-01"), title="Start Date", group=group5)
+endDate = input.time(timestamp("2025-01-01"), title="End Date", group=group5)
+
+// === STC CALCULATION (NON-REPAINT) ===
+stcFunc(src, len, fastLen, slowLen, smooth) =>
+    macd = ta.ema(src, fastLen) - ta.ema(src, slowLen)
+    ll1 = ta.lowest(macd, len)
+    hh1 = ta.highest(macd, len)
+    k = hh1 - ll1 > 0 ? (macd - ll1) / (hh1 - ll1) * 100 : 0.0
+    k_smooth = 0.0
+    k_smooth := na(k_smooth[1]) ? k : k_smooth[1] + smooth * (k - k_smooth[1])
+    ll2 = ta.lowest(k_smooth, len)
+    hh2 = ta.highest(k_smooth, len)
+    d = hh2 - ll2 > 0 ? (k_smooth - ll2) / (hh2 - ll2) * 100 : 0.0
+    d_smooth = 0.0
+    d_smooth := na(d_smooth[1]) ? d : d_smooth[1] + smooth * (d - d_smooth[1])
+    d_smooth
+
+// Calculate STC on confirmed bars
+currentSTC = stcFunc(close[1], length, fastLength, slowLength, smoothing)
+currentSTC_prev = currentSTC[1]
+
+// === FILTERS (NON-REPAINT) ===
+// Trend Filter
+ma = ta.sma(close[1], trendMA)
+trendUp = close[1] > ma
+trendDown = close[1] < ma
+trendFilterLong = not useTrendFilter or trendUp
+trendFilterShort = not useTrendFilter or trendDown
+
+// Volume Filter
+volMA = ta.sma(volume[1], volumeLength)
+volumeOK = not useVolumeFilter or volume[1] > volMA * volumeMult
+
+// === SIGNAL GENERATION (NON-REPAINT) ===
+// Entry Signals based on mode
+longSignalRaw = false
+shortSignalRaw = false
+
+if entryMode == "Threshold Cross"
+    longSignalRaw := ta.crossover(currentSTC[1], lowerThresh)
+    shortSignalRaw := ta.crossunder(currentSTC[1], upperThresh)
+else if entryMode == "Direction Change"
+    longSignalRaw := currentSTC > currentSTC_prev and currentSTC_prev <= currentSTC[2] and currentSTC < 50
+    shortSignalRaw := currentSTC < currentSTC_prev and currentSTC_prev >= currentSTC[2] and currentSTC > 50
+
+// Apply confirmation
+longConfirmed = confirmBars == 0 ? longSignalRaw : longSignalRaw and longSignalRaw[confirmBars]
+shortConfirmed = confirmBars == 0 ? shortSignalRaw : shortSignalRaw and shortSignalRaw[confirmBars]
+
+// Apply filters
+longSignal = longConfirmed and trendFilterLong and volumeOK
+shortSignal = shortConfirmed and trendFilterShort and volumeOK
+
+// Exit Signals based on mode  
+longExit = false
+shortExit = false
+
+if exitMode == "Opposite Signal"
+    longExit := shortSignal
+    shortExit := longSignal
+else if exitMode == "Opposite Threshold"
+    longExit := currentSTC[1] > upperThresh
+    shortExit := currentSTC[1] < lowerThresh
+else if exitMode == "Direction Change"
+    longExit := currentSTC < currentSTC_prev
+    shortExit := currentSTC > currentSTC_prev
+
+// Time Filter
+inTimeRange = not useTimeFilter or (time >= startDate and time <= endDate)
+
+// === STRATEGY EXECUTION ===
+if inTimeRange
+    // Long Entry
+    if longSignal and strategy.position_size <= 0
+        if strategy.position_size < 0
+            strategy.close("Short", comment="Close Short")
+        strategy.entry("Long", strategy.long, comment="STC Long")
+        
+        if useStopLoss or useTakeProfit
+            stopPrice = useStopLoss ? close[1] * (1 - stopLossPerc/100) : na
+            profitPrice = useTakeProfit ? close[1] * (1 + takeProfitPerc/100) : na
+            strategy.exit("Long Exit", "Long", stop=stopPrice, limit=profitPrice)
+    
+    // Long Exit
+    if longExit and strategy.position_size > 0
+        strategy.close("Long", comment="Exit Long Signal")
+    
+    // Short Entry
+    if shortSignal and strategy.position_size >= 0
+        if strategy.position_size > 0
+            strategy.close("Long", comment="Close Long")
+        strategy.entry("Short", strategy.short, comment="STC Short")
+        
+        if useStopLoss or useTakeProfit
+            stopPrice = useStopLoss ? close[1] * (1 + stopLossPerc/100) : na
+            profitPrice = useTakeProfit ? close[1] * (1 - takeProfitPerc/100) : na
+            strategy.exit("Short Exit", "Short", stop=stopPrice, limit=profitPrice)
+    
+    // Short Exit
+    if shortExit and strategy.position_size < 0
+        strategy.close("Short", comment="Exit Short Signal")
+
+// === PLOTS ===
+// STC Line
+plot(currentSTC, title="STC", color=currentSTC > upperThresh ? color.red : currentSTC < lowerThresh ? color.green : color.blue, linewidth=2)
+
+// Thresholds
+hline(upperThresh, title="Upper Threshold", color=color.red, linestyle=hline.style_dashed)
+hline(lowerThresh, title="Lower Threshold", color=color.green, linestyle=hline.style_dashed)
+hline(50, title="Middle Line", color=color.gray, linestyle=hline.style_dotted)
+
+// MA
+plot(useTrendFilter ? ma : na, "Trend MA", color=color.purple, linewidth=2)
+
+// Signal Markers
+plotshape(longSignal and inTimeRange, title="Long Signal", location=location.belowbar, color=color.green, style=shape.triangleup, text="BUY", size=size.small)
+plotshape(shortSignal and inTimeRange, title="Short Signal", location=location.abovebar, color=color.red, style=shape.triangledown, text="SELL", size=size.small)
+
+// Background
+bgcolor(not inTimeRange ? color.new(color.gray, 90) : na, title="Outside Time Range")
+bgcolor(volumeOK ? color.new(color.yellow, 95) : na, title="Volume Spike")
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 95) : strategy.position_size < 0 ? color.new(color.red, 95) : na, title="Position")
