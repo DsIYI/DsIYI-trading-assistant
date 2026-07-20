@@ -1,0 +1,70 @@
+//@version=6
+strategy(title="Bitget BB Breakout Strategy [Upgraded]", shorttitle="BB-Bitget", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_order_fills=false, calc_on_every_tick=false, process_orders_on_close=true)
+
+// === BACKTEST RANGE ===
+fromDate = input.time(timestamp("2024-01-01 00:00 +0000"), "From Date")
+toDate   = input.time(timestamp("2030-01-01 00:00 +0000"), "To Date")
+inDateRange = time >= fromDate and time <= toDate
+
+// === BOLLINGER BAND SETTINGS ===
+length = input.int(100, title="BB Length", minval=1)
+mult   = input.float(1.5, title="BB StdDev", step=0.1)
+basis  = ta.ema(close, length)
+dev    = mult * ta.stdev(close, length)
+upper  = basis + dev
+lower  = basis - dev
+
+// === EMA & SAR FILTERS ===
+useEMA      = input.bool(true, title="Enable EMA Filter")
+emaPeriod   = input.int(100, title="EMA Period")
+ema         = ta.ema(close, emaPeriod)
+
+useSAR      = input.bool(true, title="Enable Parabolic SAR")
+sarStart    = input.float(0.1, title="SAR Start", step=0.1)
+sarStep     = input.float(0.3, title="SAR Step", step=0.1)
+sarMax      = input.float(1.0, title="SAR Max", step=0.1)
+sar         = ta.sar(sarStart * 0.01, sarStep * 0.01, sarMax * 0.1)
+
+// === STRATEGY CONTROLS ===
+sl_percent  = input.float(1.0, title="Stop-Loss %", step=0.001)
+tp_enabled  = input.bool(false, title="Enable Take-Profit")
+tp_percent  = input.float(2.0, title="Take-Profit %", step=0.1)
+reversible  = input.bool(true, title="Reversible Mode (TP + Opposite Signal Entry)")
+
+// === POSITION CONDITIONS ===
+longCondition  = ema < upper and close > upper
+shortCondition = ema > lower and close < lower
+
+// === STOP & TP PRICING ===
+sl_long  = close * (1 - sl_percent / 100)
+sl_short = close * (1 + sl_percent / 100)
+tp_long  = close * (1 + tp_percent / 100)
+tp_short = close * (1 - tp_percent / 100)
+
+// === ONCE-PER-BAR LOGIC ===
+var int lastTradeBar = na
+canTrade = na(lastTradeBar) or lastTradeBar != bar_index
+
+// === STRATEGY ENTRIES ===
+if inDateRange and canTrade
+    if longCondition
+        strategy.close("Sell Short", comment="close_S")
+        strategy.entry("Buy Long", strategy.long, comment="Buy Long")
+        lastTradeBar := bar_index
+    if shortCondition
+        strategy.close("Sell Long", comment="close_L")
+        strategy.entry("Buy Short", strategy.short, comment="Buy Short")
+        lastTradeBar := bar_index
+
+// === STRATEGY EXITS ===
+if strategy.position_size > 0
+    strategy.exit("Sell Long", from_entry="Buy Long", stop=sl_long, limit=tp_enabled ? tp_long : na, comment="Sell Long")
+if strategy.position_size < 0
+    strategy.exit("Sell Short", from_entry="Buy Short", stop=sl_short, limit=tp_enabled ? tp_short : na, comment="Sell Short")
+
+// === PLOTS ===
+plot(basis, title="BB Basis", color=color.orange)
+plot(upper, title="BB Upper", color=color.blue)
+plot(lower, title="BB Lower", color=color.blue)
+plot(useEMA ? ema : na, title="EMA", color=color.green)
+plot(useSAR ? sar : na, title="Parabolic SAR", style=plot.style_cross, color=color.red)

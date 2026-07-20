@@ -1,0 +1,60 @@
+//@version=5
+strategy("Bollinger Bands and RSI Strategy", "BBRSI", overlay=true)
+
+//=====================================================
+// TIME FILTER
+//=====================================================
+useTime = input.bool(true, "Enable Time Filter", group="TIME")
+fromY   = input.int(2026, "From Year",  group="TIME")
+fromM   = input.int(1,    "From Month", group="TIME")
+fromD   = input.int(1,    "From Day",   group="TIME")
+toY     = input.int(9999, "To Year",    group="TIME")
+toM     = input.int(12,   "To Month",   group="TIME")
+toD     = input.int(31,   "To Day",     group="TIME")
+
+start  = timestamp(fromY, fromM, fromD, 0, 0)
+finish = timestamp(toY,   toM,   toD,   23, 59)
+timeOk = not useTime or (time >= start and time <= finish)
+
+bbLength = input.int(20, "BB Length", minval=1)
+bbMult = input.float(2.0, "BB StdDev", minval=0.001, maxval=50)
+rsiLength = input.int(3, "RSI Length", minval=1)
+slCoef = input.float(1.5, "SL Coef")
+tpCoef = input.float(1.5, "TP Coef")
+closeBbBasis = input.bool(true, "Close on BB Basis")
+
+bbBasis = ta.sma(close, bbLength)
+dev = bbMult * ta.stdev(close, bbLength)
+bbUpper = bbBasis + dev
+bbLower = bbBasis - dev
+
+up = ta.rma(math.max(ta.change(close), 0), rsiLength)
+down = ta.rma(-math.min(ta.change(close), 0), rsiLength)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+rsiUpper = 70
+rsiBasis = 50
+rsiLower = 30
+
+longSignal = rsi[1] < rsiLower and close[1] < bbLower and rsi > rsiLower and close > bbLower and rsi < rsiBasis and close < bbBasis
+shortSignal = rsi[1] > rsiUpper and close[1] > bbUpper and rsi < rsiUpper and close < bbUpper and rsi > rsiBasis and close > bbBasis
+
+longSL = bbLower - slCoef * (bbBasis - bbLower)
+shortSL = bbUpper + slCoef * (bbUpper - bbBasis)
+
+if closeBbBasis and timeOk
+    if (ta.crossover(close, bbBasis))
+        strategy.close(id="long", comment="Close longs")
+    if (ta.crossunder(close, bbBasis))
+        strategy.close(id="short", comment="Close shorts")
+
+if longSignal and timeOk
+    strategy.entry("long", strategy.long)
+    inn = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    longTP = inn + tpCoef * (inn - longSL)
+    strategy.exit("exit", "long", stop=longSL, limit=longTP, comment_loss="SL long", comment_profit="TP long")
+
+if shortSignal and timeOk
+    strategy.entry("short", strategy.short)
+    inn = strategy.opentrades.entry_price(strategy.opentrades - 1)
+    shortTp = inn - tpCoef * (shortSL - inn)
+    strategy.exit("exit", "short", stop=shortSL, limit=shortTp, comment_loss="SL short", comment_profit="TP short")

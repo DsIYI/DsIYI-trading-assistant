@@ -1,0 +1,135 @@
+//@version=5 
+ 
+// ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ 
+// 
+//  ----------------------------------------------------------------------------- 
+//  Copyright © 2024 Skyrexio. All rights reserved. 
+//  ----------------------------------------------------------------------------- 
+// 
+//  Version: v1.0 
+//  Release:  November 4, 2024
+indicator("Bullish/Bearish Reversal Bars Indicator [Skyrexio]", overlay = true)
+
+///_______ <constant_declarations>
+var const color skyrexGreen       = color.new(#2ECD99, 0)
+var const color skyrexGray        = color.new(#F2F2F2, 0)
+var const color skyrexWhite       = color.new(#FFFFFF, 0)
+
+
+//________<variables declarations>
+var float bullBarConfirmationLevel = na
+var float bullBarInvalidationLevel = na
+var float bearBarInvalidationLevel = na 
+var float bearBarConfirmationLevel = na 
+var labels = array.new<label>(0)
+var bool isTrueBullishReversalBar  = false
+var bool isTrueBearishReversalBar  = false
+
+//_______ <inputs>
+enable_MFI = input.bool(true, title = 'Enable MFI')
+enable_AO  = input.bool(true, title = 'Enable AO')
+
+
+//_______ <function_declarations>
+//@function       Used to calculate Simple moving average for Alligator
+//@param src      Sourse for smma Calculations
+//@param length   Number of bars to calculate smma
+//@returns        The calculated smma value 
+smma(src, length) =>
+    var float smma = na
+    sma_value = ta.sma(src, length)
+    smma := na(smma) ? sma_value : (smma * (length - 1) + src) / length
+    smma
+
+
+//@function       Used to define if the current bar is bullish reversal
+//@returns        True if bar is bullish reversal, False otherwise 
+isBullishReversalBar() =>
+    result = close > hl2 and ta.lowest(7) == low
+    result 
+
+
+//@function       Used to define if the current bar is bearish reversal
+//@returns        True if bar is bearish reversal, False otherwise 
+isBearishReversalBar() =>
+    result = close < hl2 and ta.highest(7) == high
+    result 
+//_______ <calculations>
+
+
+//Calculating MFI
+MFI      = 1000000000 * (high - low) / volume  
+PreMFI   = 1000000000 * (high[1] - low [1]) / volume[1]
+greenbar = (MFI > PreMFI) and (volume > volume[1])
+fadebar  = (MFI < PreMFI) and (volume < volume[1])
+fakebar  = (MFI > PreMFI) and (volume < volume[1])
+squatbar = (MFI < PreMFI) and (volume > volume[1])
+
+//Calculating Awesome Oscillator
+ao   = ta.sma(hl2,5) - ta.sma(hl2,34)
+diff = ao - ao[1]
+
+//Calculating chart's time frame Alligator's lines (Jaw, Teeth, Lips)
+jaw   = smma(hl2, 13)[8]
+teeth = smma(hl2, 8)[5]
+lips  = smma(hl2, 5)[3]
+
+
+//Calculating the bullish and bearish reversal bars according to inputs
+if enable_AO and enable_MFI
+    isTrueBearishReversalBar := isBearishReversalBar() and low > jaw and low > teeth and low > lips and diff > 0 and (squatbar or squatbar[1] or squatbar[2])
+    isTrueBullishReversalBar := isBullishReversalBar() and high < jaw and high < teeth and high < lips and diff < 0 and (squatbar or squatbar[1] or squatbar[2])
+
+if enable_AO and not enable_MFI
+    isTrueBearishReversalBar := isBearishReversalBar() and low > jaw and low > teeth and low > lips and diff > 0 
+    isTrueBullishReversalBar := isBullishReversalBar() and high < jaw and high < teeth and high < lips and diff < 0
+
+if not enable_AO and enable_MFI 
+    isTrueBearishReversalBar := isBearishReversalBar() and low > jaw and low > teeth and low > lips and (squatbar or squatbar[1] or squatbar[2])
+    isTrueBullishReversalBar := isBullishReversalBar() and high < jaw and high < teeth and high < lips and (squatbar or squatbar[1] or squatbar[2])
+
+if not enable_AO and not enable_MFI
+    isTrueBearishReversalBar := isBearishReversalBar() and low > jaw and low > teeth and low > lips 
+    isTrueBullishReversalBar := isBullishReversalBar() and high < jaw and high < teeth and high < lips 
+
+
+//Plotting the bullish reversal bars labels
+if isTrueBullishReversalBar
+    bullBarConfirmationLevel := high 
+    bullBarInvalidationLevel := low
+
+if isTrueBullishReversalBar
+    array.push(labels, label.new(x = bar_index, y = low, yloc=yloc.belowbar,  text = 'BULL', color = skyrexGreen, style = label.style_circle, textcolor = skyrexGreen, size = size.tiny))
+
+if ta.crossunder(low, bullBarInvalidationLevel)
+    label.delete(array.get(labels, array.size(labels) - 1))
+    array.remove(labels, array.size(labels) - 1)
+
+if ta.crossover(high, bullBarConfirmationLevel) or ta.crossunder(low, bullBarInvalidationLevel)
+    bullBarConfirmationLevel := na
+    bullBarInvalidationLevel := na 
+
+
+//Plotting the bearish reversal bars labels
+if isTrueBearishReversalBar
+    bearBarConfirmationLevel := low
+    bearBarInvalidationLevel := high
+
+if isTrueBearishReversalBar
+    array.push(labels, label.new(x = bar_index, y = high, yloc = yloc.abovebar, text = 'BEAR', color = color.red, style = label.style_circle, textcolor = color.red, size = size.tiny))
+
+if ta.crossover(high, bearBarInvalidationLevel)
+    label.delete(array.get(labels, array.size(labels) - 1))
+    array.remove(labels, array.size(labels) - 1)
+
+if ta.crossunder(low, bearBarConfirmationLevel) or ta.crossover(high, bearBarInvalidationLevel)
+    bearBarConfirmationLevel := na 
+    bearBarInvalidationLevel := na 
+
+
+//Plot the lips line
+plot(lips, linewidth = 3, color = skyrexGray)
+
+//Set up the alert conditions 
+alertcondition(isTrueBearishReversalBar, title = "Bearish reversal bar has been printed", message = "Bearish reversal bar has been printed")
+alertcondition(isTrueBullishReversalBar, title = "Bullish reversal bar has been printed", message = "Bullish reversal bar has been printed")

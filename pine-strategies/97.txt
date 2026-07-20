@@ -1,0 +1,226 @@
+//@version=6
+strategy(title="Supertrend + Manual Filters + BetterTrend Confirmation (Custom ADX)", 
+     overlay=true, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=15)
+
+//=============================================================================
+// 1) Time Window Filters
+//=============================================================================
+useTimeFilter = input.bool(true, title="Enable Time Filter?")
+FromMonth     = input.int(4,  title='From Month', minval=1, maxval=12)
+FromDay       = input.int(17, title='From Day',   minval=1, maxval=31)
+FromYear      = input.int(2024, title='From Year', minval=2024)
+ToMonth       = input.int(12,  title='To Month',  minval=1, maxval=12)
+ToDay         = input.int(31,  title='To Day',    minval=1, maxval=31)
+ToYear        = input.int(9999, title='To Year',  minval=2024)
+
+start  = timestamp(FromYear, FromMonth, FromDay, 0, 0)
+finish = timestamp(ToYear,   ToMonth,   ToDay,   23, 59)
+timeFilterPass = not useTimeFilter or (time >= start and time <= finish)
+
+//=============================================================================
+// 2) Supertrend Filter (Original Strategy)
+//=============================================================================
+useSupertrend    = input.bool(true, title="Enable Supertrend Filter? (Orig)")
+atrPeriod        = input.int(7,  title='ATR Length (Orig ST)')
+factor           = input.float(0.5, title='Supertrend Factor (Orig)', step=0.01)
+[_, direction]   = ta.supertrend(factor, atrPeriod)
+supertrendLong   = ta.change(direction) < 0   // direction changed to bullish
+supertrendShort  = ta.change(direction) > 0   // direction changed to bearish
+
+supertrendPassLong  = not useSupertrend or supertrendLong
+supertrendPassShort = not useSupertrend or supertrendShort
+
+//=============================================================================
+// 3) EMA Filters (Original Strategy)
+//=============================================================================
+useEMAFilter  = input.bool(true, title="Enable EMA Filter? (Orig)")
+emaLength2m   = input.int(9, 'EMA Length (2m)', minval=1)
+emaLength5m   = input.int(9, 'EMA Length (5m)', minval=1)
+ema2m         = ta.ema(close, emaLength2m)
+ema5m         = ta.ema(close, emaLength5m)
+
+emaConditionLong  = close > ema2m and close > ema5m
+emaConditionShort = close < ema2m and close < ema5m
+
+emaPassLong  = not useEMAFilter or emaConditionLong
+emaPassShort = not useEMAFilter or emaConditionShort
+
+//=============================================================================
+// 4) Volume Filters (Original)
+//=============================================================================
+useVolumeFilter = input.bool(true, title="Enable Volume Filter? (Orig)")
+volumeLookback  = input.int(50, 'Volume Lookback', minval=1)
+avgVolume       = ta.sma(volume, volumeLookback)
+volumeCondition = volume > avgVolume
+volumePass      = not useVolumeFilter or volumeCondition
+
+//=============================================================================
+// 5) RSI Filter (Original)
+//=============================================================================
+useRSIFilter   = input.bool(false, title="Enable RSI Filter? (Orig)")
+rsiLength      = input.int(14, title="RSI Length")
+rsiOverbought  = input.int(70, title="RSI Overbought Level")
+rsiOversold    = input.int(30, title="RSI Oversold Level")
+rsiValue       = ta.rsi(close, rsiLength)
+rsiPassLong    = not useRSIFilter or (rsiValue < rsiOversold)
+rsiPassShort   = not useRSIFilter or (rsiValue > rsiOverbought)
+
+//=============================================================================
+// 6) Custom ADX Function (Replaces ta.adx)
+//=============================================================================
+f_adx(_length) =>
+    // Calculate +DM, -DM
+    pdm = ta.change(high)
+    ndm = -ta.change(low)
+    plusDM  = (pdm > 0 and pdm > ndm) ? pdm : 0.0
+    minusDM = (ndm > 0 and ndm > pdm) ? ndm : 0.0
+    
+    // True range
+    // We'll compute manually:
+    tr1 = high - low
+    tr2 = math.abs(high - close[1])
+    tr3 = math.abs(low  - close[1])
+    _tr = math.max(tr1, math.max(tr2, tr3))
+    
+    // Smoothed moving averages (RMA)
+    valTR      = ta.rma(_tr,   _length)
+    valPlusDM  = ta.rma(plusDM,  _length)
+    valMinusDM = ta.rma(minusDM, _length)
+    
+    // +DI, -DI
+    plusDI  = 100 * (valPlusDM  / valTR)
+    minusDI = 100 * (valMinusDM / valTR)
+    
+    // DX
+    _dx   = 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI)
+    // ADX = RMA of DX
+    ta.rma(_dx, _length)
+
+//=============================================================================
+// 7) Better Trend Confirmation (Optional Additional Filter)
+//=============================================================================
+useBetterTrend = input.bool(false, title="Enable Better Multi-Factor Trend?")
+
+// -- Sub-settings for "Better Trend" --
+betterUseST    = input.bool(true,  "BetterTrend: Enable Supertrend Confirmation?")
+betterSTFactor = input.float(2.0,  "BetterTrend: Supertrend Factor", step=0.1)
+betterSTATR    = input.int(10,     "BetterTrend: Supertrend ATR Period", minval=1)
+
+betterUseADX   = input.bool(true,  "BetterTrend: Enable ADX Filter?")
+betterADXPeriod    = input.int(14, "BetterTrend: ADX Period", minval=1)
+betterADXThreshold = input.int(20, "BetterTrend: ADX Threshold", minval=1)
+
+betterFastMA   = input.int(20, "BetterTrend: Fast MA Length", minval=1)
+betterSlowMA   = input.int(50, "BetterTrend: Slow MA Length", minval=2)
+betterMAType   = input.string("EMA", "BetterTrend: MA Type", options=["SMA","EMA","WMA","LWMA"])
+
+// Helper function to get chosen MA
+f_getMA(src, length, type) =>
+    switch type
+        "SMA"  => ta.sma(src, length)
+        "EMA"  => ta.ema(src, length)
+        "WMA"  => ta.wma(src, length)
+        "LWMA" => ta.linreg(src, length, 0)
+
+// Better Trend Calculations
+bt_fastMA  = f_getMA(close, betterFastMA, betterMAType)
+bt_slowMA  = f_getMA(close, betterSlowMA, betterMAType)
+
+// 1) MAs
+bt_maBull = bt_fastMA > bt_slowMA
+bt_maBear = bt_fastMA < bt_slowMA
+
+// 2) ADX (custom)
+bt_adxValue  = f_adx(betterADXPeriod)
+bt_adxStrong = bt_adxValue > betterADXThreshold
+
+// 3) Better ST
+[bt_stValue, bt_stDirection] = ta.supertrend(betterSTFactor, betterSTATR)
+bt_stBull = bt_stDirection == 1
+bt_stBear = bt_stDirection == -1
+
+bt_useBullST  = not betterUseST or bt_stBull
+bt_useBearST  = not betterUseST or bt_stBear
+bt_useADXPass = not betterUseADX or bt_adxStrong
+
+// Final: bullTrend / bearTrend from "Better" logic
+bt_bullTrend = bt_maBull and bt_useBullST and bt_useADXPass
+bt_bearTrend = bt_maBear and bt_useBearST and bt_useADXPass
+
+//=============================================================================
+// 8) Combine All Filters
+//=============================================================================
+// Original logic:
+origLongCond  = supertrendPassLong  and emaPassLong  and volumePass and rsiPassLong  and timeFilterPass
+origShortCond = supertrendPassShort and emaPassShort and volumePass and rsiPassShort and timeFilterPass
+
+// "Better Trend" logic is optional. If useBetterTrend is ON, we also require bt_bullTrend for longs, bt_bearTrend for shorts.
+finalLongCondition  = origLongCond and (not useBetterTrend or bt_bullTrend)
+finalShortCondition = origShortCond and (not useBetterTrend or bt_bearTrend)
+
+//=============================================================================
+// 9) Allowed Trade Direction (Long Only / Short Only / Both)
+//=============================================================================
+tradeDirection = input.string("Both", "Allowed Trade Direction", options=["Both","Long Only","Short Only"])
+// Filter final conditions by user-chosen direction
+finalLongCondition  := finalLongCondition  and (tradeDirection == "Both" or tradeDirection == "Long Only")
+finalShortCondition := finalShortCondition and (tradeDirection == "Both" or tradeDirection == "Short Only")
+
+//=============================================================================
+// 10) Stop-Loss & Trailing Stop-Loss
+//=============================================================================
+fixedStopLoss = input.float(2.0, 'Fixed Stop-Loss (%)', minval=0.1, maxval=50.0)
+trailingStop  = input.float(1.5, 'Trailing Stop (%)', step=0.1)
+
+longStopLoss  = close * (1 - fixedStopLoss / 100)
+shortStopLoss = close * (1 + fixedStopLoss / 100)
+
+//=============================================================================
+// ► Trade Execution with Alerts for Bitget (Market Orders)
+//=============================================================================
+
+// Track Open Positions
+var bool inLong = false
+var bool inShort = false
+var float lastTradeTimestamp = na // Initialize the timestamp variable
+
+if finalLongCondition
+    if inShort
+        // Close Short Position First
+        strategy.close("Short Entry", comment="Close Short on Long Signal")
+        alert('{ "id": "close_short_' + str.tostring(time) + '", "symbol": "SOLUSDT", "marginCoin": "USDT", "side": "buy", "posSide": "short", "size": 1, "orderType": "market", "reduceOnly": true }', alert.freq_once_per_bar)
+        inShort := false  // Mark Short as closed
+        lastTradeTimestamp := time
+
+    if not inLong
+        // Open Long Trade After Confirming Short is Closed
+        strategy.entry("Long Entry", strategy.long)
+        strategy.exit("Close Long", "Long Entry", stop=longStopLoss, trail_points=trailingStop / 100 * close, trail_offset=trailingStop / 100 * close)
+        alert('{ "id": "open_long_' + str.tostring(time) + '", "symbol": "SOLUSDT", "marginCoin": "USDT", "side": "buy", "posSide": "long", "size": 1, "orderType": "market", "reduceOnly": false }', alert.freq_once_per_bar)
+        inLong := true
+        lastTradeTimestamp := time
+
+if finalShortCondition
+    if inLong
+        // Close Long Position First
+        strategy.close("Long Entry", comment="Close Long on Short Signal")
+        alert('{ "id": "close_long_' + str.tostring(time) + '", "symbol": "SOLUSDT", "marginCoin": "USDT", "side": "sell", "posSide": "long", "size": 1, "orderType": "market", "reduceOnly": true }', alert.freq_once_per_bar)
+        inLong := false  // Mark Long as closed
+        lastTradeTimestamp := time
+
+    if not inShort
+        // Open Short Trade After Confirming Long is Closed
+        strategy.entry("Short Entry", strategy.short)
+        strategy.exit("Close Short", "Short Entry", stop=shortStopLoss, trail_points=trailingStop / 100 * close, trail_offset=trailingStop / 100 * close)
+        alert('{ "id": "open_short_' + str.tostring(time) + '", "symbol": "SOLUSDT", "marginCoin": "USDT", "side": "sell", "posSide": "short", "size": 1, "orderType": "market", "reduceOnly": false }', alert.freq_once_per_bar)
+        inShort := true
+        lastTradeTimestamp := time
+
+//=============================================================================
+// 12) (Optional) Plot Some Visuals
+//=============================================================================
+// Plot or hide as you see fit:
+plot(bt_fastMA, color=color.yellow, linewidth=2, title="Better Fast MA", display=display.none)
+plot(bt_slowMA, color=color.orange, linewidth=2, title="Better Slow MA", display=display.none)

@@ -1,0 +1,68 @@
+//@version=5
+strategy("John Reversible Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Date Range Inputs
+startDate = input.time(defval = timestamp("2023-01-01T00:00:00"), title = "Start Date")
+endDate = input.time(defval = timestamp("2023-12-31T00:00:00"), title = "End Date")
+
+// Stop Loss in %
+stopLossPercent = input.float(1.0, title="Stop Loss (%)", step=0.1)
+
+// Other Inputs
+a = input(1, title='Чувствительность')
+c = input(10, title='Период ATR')
+h = input(false, title='Сигналы Heikin Ashi')
+signal_length = input.int(title='Сглаживание', minval=1, maxval=200, defval=11)
+sma_signal = input(title='Сигнальная линия (MA)', defval=true)
+lin_reg = input(title='Линейная регрессия', defval=false)
+linreg_length = input.int(title='Длина линейной регрессии', minval=1, maxval=200, defval=11)
+
+// Bollinger Bands
+bollinger = input(false, title='Боллинджер')
+bolingerlength = input(20, 'Длина')
+bsrc = close
+mult = input.float(2.0, title='Смещение', minval=0.001, maxval=50)
+basis = ta.sma(bsrc, bolingerlength)
+dev = mult * ta.stdev(bsrc, bolingerlength)
+upper = basis + dev
+lower = basis - dev
+
+// EMA
+len = input(title='Длина EMA', defval=50)
+ema1 = ta.ema(close, len)
+
+xATR = ta.atr(c)
+nLoss = a * xATR
+
+src = h ? request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, close, lookahead=barmerge.lookahead_off) : close
+
+xATRTrailingStop = 0.0
+iff_1 = src > nz(xATRTrailingStop[1], 0) ? src - nLoss : src + nLoss
+iff_2 = src < nz(xATRTrailingStop[1], 0) and src[1] < nz(xATRTrailingStop[1], 0) ? math.min(nz(xATRTrailingStop[1]), src + nLoss) : iff_1
+xATRTrailingStop := src > nz(xATRTrailingStop[1], 0) and src[1] > nz(xATRTrailingStop[1], 0) ? math.max(nz(xATRTrailingStop[1]), src - nLoss) : iff_2
+
+// Trading Conditions
+longCondition = src > xATRTrailingStop and ta.crossover(ema1, xATRTrailingStop)
+shortCondition = src < xATRTrailingStop and ta.crossunder(ema1, xATRTrailingStop)
+
+// Trade Execution
+if (longCondition and time >= startDate and time <= endDate)
+    strategy.entry("Long", strategy.long, comment="Long Entry")
+    strategy.close("Short", comment="Close Short on Long Signal")
+
+if (shortCondition and time >= startDate and time <= endDate)
+    strategy.entry("Short", strategy.short, comment="Short Entry")
+    strategy.close("Long", comment="Close Long on Short Signal")
+
+// Stop Loss Calculation
+longStopLoss = strategy.position_avg_price * (1 - stopLossPercent / 100)
+shortStopLoss = strategy.position_avg_price * (1 + stopLossPercent / 100)
+
+strategy.exit("Stop Long", "Long", stop=longStopLoss)
+strategy.exit("Stop Short", "Short", stop=shortStopLoss)
+
+// Visualization
+plot(basis, color=color.red, title='SMA Basis')
+plot(upper, color=color.blue, title='Upper Band')
+plot(lower, color=color.blue, title='Lower Band')
+plot(ema1, color=color.yellow, linewidth=2, title='EMA')

@@ -1,0 +1,42 @@
+//@version=6
+strategy(title="Bullish Uptrend Channel Strategy (v6)", shorttitle="BullUpChan_v6", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === INPUTS ===
+// How many hours to use for the channel calculation
+channelHours  = input.int(20,  "Channel Lookback (hours)")
+fastMaHours   = input.int(50,  "Fast MA (hours)")
+slowMaHours   = input.int(200, "Slow MA (hours)")
+
+// === TREND FILTER (UPTREND) ===
+// A simple filter: fast MA > slow MA, using hourly bars
+fastMA  = ta.sma(close, fastMaHours)
+slowMA  = ta.sma(close, slowMaHours)
+trendUp = fastMA > slowMA
+
+// === CHANNEL CALCULATION ===
+lowerBand = ta.lowest(low, channelHours)
+upperBand = ta.highest(high, channelHours)
+
+// === CONDITIONS ===
+touchLower = close <= lowerBand   // Touch or dip below the lower channel
+breakUpper = close >  upperBand   // Break above the upper channel
+
+// Are we currently in a position?
+inTrade = strategy.position_size > 0
+
+// --- ENTRY #1: Buy on lower band touch in an uptrend ---
+if trendUp and not inTrade and touchLower
+    strategy.entry(id="LongLower", direction=strategy.long)
+    alert("BUY on Lower Band Touch", alert.freq_once_per_bar)
+
+// --- ENTRY #2: Buy on upper band breakout in an uptrend ---
+if trendUp and not inTrade and breakUpper
+    strategy.entry(id="LongBreak", direction=strategy.long)
+    alert("BUY on Upper Band Breakout", alert.freq_once_per_bar)
+
+// --- EXIT / TAKE PROFIT: Close positions when price >= upperBand ---
+if inTrade and close >= upperBand
+    // Close both entries (LongLower & LongBreak) if either/both are open
+    strategy.close("LongLower", comment="TP @ Upper Band")
+    strategy.close("LongBreak", comment="TP @ Upper Band")
+    alert("TAKE PROFIT: Upper Band Touched", alert.freq_once_per_bar)

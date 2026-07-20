@@ -1,0 +1,598 @@
+//@version=5
+strategy("Crypto Perpetual Compounder v2 [BACKTEST]", 
+         overlay=true, 
+         initial_capital=1000,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=1000,
+         commission_type=strategy.commission.percent,
+         commission_value=0.05,
+         slippage=2,
+         pyramiding=0,
+         calc_on_every_tick=true,
+         process_orders_on_close=false,
+         max_labels_count=500,
+         max_bars_back=5000)
+
+// ═══════════════════════════════════════════════════════════════
+// BACKTESTING НАСТРОЙКИ
+// ═══════════════════════════════════════════════════════════════
+grp0 = "📅 BACKTEST ПЕРИОД"
+useBacktestPeriod = input.bool(true, "Използвай период за backtest", group=grp0)
+startDate = input.time(timestamp("2026-01-01 00:00"), "Начална дата", group=grp0)
+endDate = input.time(timestamp("2029-12-31 23:59"), "Крайна дата", group=grp0)
+
+grp00 = "📊 BACKTEST СТАТИСТИКИ"
+showEquityCurve = input.bool(true, "Покажи Equity Curve", group=grp00)
+showDrawdown = input.bool(true, "Покажи Drawdown", group=grp00)
+showDetailedStats = input.bool(true, "Покажи детайлна статистика", group=grp00)
+showTradeLabels = input.bool(true, "Покажи етикети на трейдове", group=grp00)
+
+// ═══════════════════════════════════════════════════════════════
+// ОСНОВНИ НАСТРОЙКИ
+// ═══════════════════════════════════════════════════════════════
+grp1 = "💰 КАПИТАЛ И РИСК"
+leverage = input.float(10, "Leverage (x)", minval=1, maxval=125, step=1, group=grp1)
+useCompounding = input.bool(true, "Използвай Compounding", group=grp1)
+
+grp2 = "📊 СВЕЩЕН АНАЛИЗ"
+lookback = input.int(14, "Период за анализ", minval=5, maxval=50, group=grp2)
+bodyMultiplier = input.float(1.5, "Голяма свещ (x)", group=grp2)
+dojiThreshold = input.float(0.1, "Doji праг", group=grp2)
+
+grp3 = "📈 ОБЕМ И MOMENTUM"
+volMultiplier = input.float(1.5, "Висок обем (x)", group=grp3)
+rsiLength = input.int(14, "RSI период", group=grp3)
+rsiOB = input.int(70, "RSI Overbought", group=grp3)
+rsiOS = input.int(30, "RSI Oversold", group=grp3)
+
+grp4 = "📉 ТРЕНД"
+emaFast = input.int(9, "EMA Fast", group=grp4)
+emaSlow = input.int(21, "EMA Slow", group=grp4)
+emaTrend = input.int(50, "EMA Trend", group=grp4)
+useTrendFilter = input.bool(true, "Използвай тренд филтър", group=grp4)
+
+grp5 = "🎯 СИГНАЛИ И ИЗХОДИ"
+minScore = input.float(5.0, "Минимален скор", minval=1.0, maxval=15.0, group=grp5)
+atrMultSL = input.float(1.5, "ATR множител за SL", minval=0.5, maxval=5.0, group=grp5)
+atrMultTP = input.float(3.0, "ATR множител за TP", minval=1.0, maxval=10.0, group=grp5)
+useTrailingStop = input.bool(true, "Използвай Trailing Stop", group=grp5)
+trailPercent = input.float(2.0, "Trailing Stop %", minval=0.01, maxval=10.0, step=0.1, group=grp5)
+cooldownBars = input.int(2, "Cooldown свещи след изход", minval=0, maxval=10, group=grp5)
+
+grp6 = "⏰ ВРЕМЕВИ ФИЛТРИ"
+useSessionFilter = input.bool(false, "Филтрирай по сесия", group=grp6)
+sessionStart = input.int(8, "Начало на сесия (UTC час)", group=grp6)
+sessionEnd = input.int(22, "Край на сесия (UTC час)", group=grp6)
+
+grp7 = "🔔 ALERTS"
+enableAlerts = input.bool(true, "Включи Alerts", group=grp7)
+
+// ═══════════════════════════════════════════════════════════════
+// BACKTEST ПЕРИОД ФИЛТЪР
+// ═══════════════════════════════════════════════════════════════
+inBacktestPeriod = useBacktestPeriod ? (time >= startDate and time <= endDate) : true
+
+// ═══════════════════════════════════════════════════════════════
+// ИЗЧИСЛЕНИЯ
+// ═══════════════════════════════════════════════════════════════
+
+bodySize = math.abs(close - open)
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+totalRange = high - low
+midBody = (open + close) / 2
+
+bodyToRange = totalRange > 0 ? bodySize / totalRange : 0
+upperWickRatio = totalRange > 0 ? upperWick / totalRange : 0
+lowerWickRatio = totalRange > 0 ? lowerWick / totalRange : 0
+
+avgBody = ta.sma(bodySize, lookback)
+avgVolume = ta.sma(volume, lookback)
+
+isBullish = close > open
+isBearish = close < open
+isLargeBody = bodySize > avgBody * bodyMultiplier
+isSmallBody = bodySize < avgBody * 0.5
+isDoji = bodyToRange < dojiThreshold
+
+isHighVolume = volume > avgVolume * volMultiplier
+isVeryHighVolume = volume > avgVolume * 2.0
+isLowVolume = volume < avgVolume * 0.5
+volumeRatio = volume / avgVolume
+
+rsi = ta.rsi(close, rsiLength)
+ema9 = ta.ema(close, emaFast)
+ema21 = ta.ema(close, emaSlow)
+ema50 = ta.ema(close, emaTrend)
+atr = ta.atr(14)
+vwap = ta.vwap(hlc3)
+
+bullTrend = ema9 > ema21 and ema21 > ema50
+bearTrend = ema9 < ema21 and ema21 < ema50
+emaCrossUp = ta.crossover(ema9, ema21)
+emaCrossDown = ta.crossunder(ema9, ema21)
+
+currentHour = hour(time, "UTC")
+inSession = not useSessionFilter or (currentHour >= sessionStart and currentHour <= sessionEnd)
+
+// ═══════════════════════════════════════════════════════════════
+// COOLDOWN СЛЕД ИЗХОД
+// ═══════════════════════════════════════════════════════════════
+var int lastExitBar = 0
+inCooldown = (bar_index - lastExitBar) < cooldownBars
+
+if strategy.closedtrades > 0 and strategy.closedtrades != strategy.closedtrades[1]
+    lastExitBar := bar_index
+
+// ═══════════════════════════════════════════════════════════════
+// СВЕЩНИ МОДЕЛИ
+// ═══════════════════════════════════════════════════════════════
+
+isHammer = lowerWickRatio > 0.6 and upperWickRatio < 0.15 and bodyToRange < 0.35 and bodyToRange > 0.05
+isShootingStar = upperWickRatio > 0.6 and lowerWickRatio < 0.15 and bodyToRange < 0.35
+isPinBarBull = lowerWickRatio > 0.65 and bodyToRange < 0.25 and upperWickRatio < 0.15
+isPinBarBear = upperWickRatio > 0.65 and bodyToRange < 0.25 and lowerWickRatio < 0.15
+isMarubozuBull = isBullish and bodyToRange > 0.85 and isLargeBody
+isMarubozuBear = isBearish and bodyToRange > 0.85 and isLargeBody
+isDojiFly = isDoji and lowerWickRatio > 0.6
+isDojiGrave = isDoji and upperWickRatio > 0.6
+
+prevBody = math.abs(close[1] - open[1])
+isBullEngulfing = isBullish and isBearish[1] and open <= close[1] and close >= open[1] and bodySize > prevBody * 1.05
+isBearEngulfing = isBearish and isBullish[1] and open >= close[1] and close <= open[1] and bodySize > prevBody * 1.05
+isPiercing = isBullish and isBearish[1] and open < low[1] and close > midBody[1]
+isDarkCloud = isBearish and isBullish[1] and open > high[1] and close < midBody[1]
+isTweezerBottom = math.abs(low - low[1]) < atr * 0.1 and isBullish and isBearish[1]
+isTweezerTop = math.abs(high - high[1]) < atr * 0.1 and isBearish and isBullish[1]
+
+prevMidBody = (open[2] + close[2]) / 2
+isMorningStar = isBearish[2] and isLargeBody[2] and (isDoji[1] or isSmallBody[1]) and isBullish and close > prevMidBody
+isEveningStar = isBullish[2] and isLargeBody[2] and (isDoji[1] or isSmallBody[1]) and isBearish and close < prevMidBody
+isThreeWhiteSoldiers = isBullish and isBullish[1] and isBullish[2] and close > close[1] and close[1] > close[2]
+isThreeBlackCrows = isBearish and isBearish[1] and isBearish[2] and close < close[1] and close[1] < close[2]
+
+// ═══════════════════════════════════════════════════════════════
+// СКОРИНГ
+// ═══════════════════════════════════════════════════════════════
+
+bullScore = 0.0
+bullScore := bullScore + (isHammer ? 2.5 : 0)
+bullScore := bullScore + (isPinBarBull ? 3.0 : 0)
+bullScore := bullScore + (isMarubozuBull ? 3.5 : 0)
+bullScore := bullScore + (isDojiFly ? 2.0 : 0)
+bullScore := bullScore + (isBullEngulfing ? 4.0 : 0)
+bullScore := bullScore + (isPiercing ? 3.0 : 0)
+bullScore := bullScore + (isTweezerBottom ? 2.5 : 0)
+bullScore := bullScore + (isMorningStar ? 4.5 : 0)
+bullScore := bullScore + (isThreeWhiteSoldiers ? 4.0 : 0)
+
+bearScore = 0.0
+bearScore := bearScore + (isShootingStar ? 2.5 : 0)
+bearScore := bearScore + (isPinBarBear ? 3.0 : 0)
+bearScore := bearScore + (isMarubozuBear ? 3.5 : 0)
+bearScore := bearScore + (isDojiGrave ? 2.0 : 0)
+bearScore := bearScore + (isBearEngulfing ? 4.0 : 0)
+bearScore := bearScore + (isDarkCloud ? 3.0 : 0)
+bearScore := bearScore + (isTweezerTop ? 2.5 : 0)
+bearScore := bearScore + (isEveningStar ? 4.5 : 0)
+bearScore := bearScore + (isThreeBlackCrows ? 4.0 : 0)
+
+volMod = isVeryHighVolume ? 2.0 : (isHighVolume ? 1.5 : (isLowVolume ? 0.5 : 1.0))
+rsiBullMod = rsi < rsiOS ? 1.5 : (rsi < 40 ? 1.2 : 1.0)
+rsiBearMod = rsi > rsiOB ? 1.5 : (rsi > 60 ? 1.2 : 1.0)
+trendBullMod = useTrendFilter ? (bullTrend ? 1.3 : (bearTrend ? 0.6 : 1.0)) : 1.0
+trendBearMod = useTrendFilter ? (bearTrend ? 1.3 : (bullTrend ? 0.6 : 1.0)) : 1.0
+vwapBullMod = close < vwap ? 1.2 : 1.0
+vwapBearMod = close > vwap ? 1.2 : 1.0
+emaCrossBullMod = emaCrossUp ? 1.5 : 1.0
+emaCrossBearMod = emaCrossDown ? 1.5 : 1.0
+
+finalBullScore = bullScore * volMod * rsiBullMod * trendBullMod * vwapBullMod * emaCrossBullMod
+finalBearScore = bearScore * volMod * rsiBearMod * trendBearMod * vwapBearMod * emaCrossBearMod
+
+// ═══════════════════════════════════════════════════════════════
+// СИГНАЛИ
+// ═══════════════════════════════════════════════════════════════
+
+longSignal = finalBullScore >= minScore and inSession and inBacktestPeriod and not inCooldown
+shortSignal = finalBearScore >= minScore and inSession and inBacktestPeriod and not inCooldown
+
+// ═══════════════════════════════════════════════════════════════
+// BACKTEST МЕТРИКИ
+// ═══════════════════════════════════════════════════════════════
+
+var float peakEquity = strategy.initial_capital
+var float maxDrawdown = 0.0
+var float maxDrawdownPercent = 0.0
+var float currentDrawdown = 0.0
+var float currentDrawdownPercent = 0.0
+
+var int totalTrades = 0
+var int winningTrades = 0
+var int losingTrades = 0
+var int longTrades = 0
+var int shortTrades = 0
+var int longWins = 0
+var int shortWins = 0
+var float grossProfit = 0.0
+var float grossLoss = 0.0
+var float largestWin = 0.0
+var float largestLoss = 0.0
+var int consecutiveWins = 0
+var int consecutiveLosses = 0
+var int maxConsecutiveWins = 0
+var int maxConsecutiveLosses = 0
+var float sumReturns = 0.0
+var float sumReturnsSquared = 0.0
+
+var float dailyStartEquity = strategy.initial_capital
+var int profitableDays = 0
+var int losingDays = 0
+var float bestDay = 0.0
+var float worstDay = 0.0
+
+var float entryPrice = 0.0
+var bool isLong = false
+var bool isShort = false
+var int entryBar = 0
+
+peakEquity := math.max(peakEquity, strategy.equity)
+currentDrawdown := peakEquity - strategy.equity
+currentDrawdownPercent := peakEquity > 0 ? (currentDrawdown / peakEquity) * 100 : 0
+maxDrawdown := math.max(maxDrawdown, currentDrawdown)
+maxDrawdownPercent := math.max(maxDrawdownPercent, currentDrawdownPercent)
+
+isNewDay = ta.change(time("D")) != 0
+if isNewDay
+    dailyPnL = strategy.equity - dailyStartEquity
+    if dailyPnL > 0
+        profitableDays := profitableDays + 1
+    else if dailyPnL < 0
+        losingDays := losingDays + 1
+    bestDay := math.max(bestDay, dailyPnL)
+    worstDay := math.min(worstDay, dailyPnL)
+    dailyStartEquity := strategy.equity
+
+// ═══════════════════════════════════════════════════════════════
+// УПРАВЛЕНИЕ НА ПОЗИЦИИТЕ
+// ═══════════════════════════════════════════════════════════════
+
+longSL = close - (atr * atrMultSL)
+longTP = close + (atr * atrMultTP)
+shortSL = close + (atr * atrMultSL)
+shortTP = close - (atr * atrMultTP)
+
+// ═══════════════════════════════════════════════════════════════
+// TRAILING STOP — ПОПРАВЕН
+// Използва trailPercent правилно в mintick единици
+// ═══════════════════════════════════════════════════════════════
+trailPointsValue = close * trailPercent / 100 / syminfo.mintick
+trailOffsetValue = trailPointsValue * 0.5
+
+// Визуален trailing stop за чарта
+var float trailStopLong = na
+var float trailStopShort = na
+
+if strategy.position_size > 0
+    trailStopLong := math.max(nz(trailStopLong), close * (1 - trailPercent / 100))
+else
+    trailStopLong := na
+
+if strategy.position_size < 0
+    trailStopShort := math.min(nz(trailStopShort, 999999), close * (1 + trailPercent / 100))
+else
+    trailStopShort := na
+
+// ═══════════════════════════════════════════════════════════════
+// ИЗПЪЛНЕНИЕ НА ОРДЕРИ
+// ═══════════════════════════════════════════════════════════════
+
+if strategy.closedtrades > 0
+    lastTradeProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    lastTradeSize = strategy.closedtrades.size(strategy.closedtrades - 1)
+    
+    if strategy.closedtrades != strategy.closedtrades[1]
+        totalTrades := strategy.closedtrades
+        
+        if lastTradeProfit > 0
+            winningTrades := winningTrades + 1
+            grossProfit := grossProfit + lastTradeProfit
+            largestWin := math.max(largestWin, lastTradeProfit)
+            consecutiveWins := consecutiveWins + 1
+            consecutiveLosses := 0
+            maxConsecutiveWins := math.max(maxConsecutiveWins, consecutiveWins)
+        else
+            losingTrades := losingTrades + 1
+            grossLoss := grossLoss + math.abs(lastTradeProfit)
+            largestLoss := math.min(largestLoss, lastTradeProfit)
+            consecutiveLosses := consecutiveLosses + 1
+            consecutiveWins := 0
+            maxConsecutiveLosses := math.max(maxConsecutiveLosses, consecutiveLosses)
+        
+        if lastTradeSize > 0
+            longTrades := longTrades + 1
+            if lastTradeProfit > 0
+                longWins := longWins + 1
+        else
+            shortTrades := shortTrades + 1
+            if lastTradeProfit > 0
+                shortWins := shortWins + 1
+        
+        tradeReturn = lastTradeProfit / strategy.initial_capital
+        sumReturns := sumReturns + tradeReturn
+        sumReturnsSquared := sumReturnsSquared + (tradeReturn * tradeReturn)
+
+// Затваряне на противоположни позиции
+if longSignal and strategy.position_size < 0
+    strategy.close("Short", comment="Reverse→L")
+
+if shortSignal and strategy.position_size > 0
+    strategy.close("Long", comment="Reverse→S")
+
+// Вход в LONG
+if longSignal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, comment="LONG")
+    entryPrice := close
+    entryBar := bar_index
+    isLong := true
+    isShort := false
+    
+    if useTrailingStop
+        // ПОПРАВЕНО: използва trailPercent в mintick единици
+        strategy.exit("Exit Long", "Long", 
+                     trail_points=trailPointsValue, 
+                     trail_offset=trailOffsetValue)
+    else
+        strategy.exit("Exit Long", "Long", stop=longSL, limit=longTP)
+    
+    if enableAlerts
+        alert("🚀 LONG | Score: " + str.tostring(finalBullScore, "#.#") + " | Price: " + str.tostring(close), alert.freq_once_per_bar)
+
+// Вход в SHORT
+if shortSignal and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, comment="SHORT")
+    entryPrice := close
+    entryBar := bar_index
+    isLong := false
+    isShort := true
+    
+    if useTrailingStop
+        // ПОПРАВЕНО: използва trailPercent в mintick единици
+        strategy.exit("Exit Short", "Short", 
+                     trail_points=trailPointsValue, 
+                     trail_offset=trailOffsetValue)
+    else
+        strategy.exit("Exit Short", "Short", stop=shortSL, limit=shortTP)
+    
+    if enableAlerts
+        alert("📉 SHORT | Score: " + str.tostring(finalBearScore, "#.#") + " | Price: " + str.tostring(close), alert.freq_once_per_bar)
+
+// Flip при обратен сигнал
+if strategy.position_size > 0 and shortSignal
+    strategy.close("Long", comment="Flip→S")
+    
+if strategy.position_size < 0 and longSignal
+    strategy.close("Short", comment="Flip→L")
+
+// ═══════════════════════════════════════════════════════════════
+// BACKTEST ИЗЧИСЛЕНИЯ
+// ═══════════════════════════════════════════════════════════════
+
+winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0
+longWinRate = longTrades > 0 ? (longWins / longTrades) * 100 : 0
+shortWinRate = shortTrades > 0 ? (shortWins / shortTrades) * 100 : 0
+
+profitFactor = grossLoss > 0 ? grossProfit / grossLoss : grossProfit > 0 ? 999.99 : 0
+
+avgWin = winningTrades > 0 ? grossProfit / winningTrades : 0
+avgLoss = losingTrades > 0 ? grossLoss / losingTrades : 0
+
+riskRewardRatio = avgLoss > 0 ? avgWin / avgLoss : 0
+
+expectancy = totalTrades > 0 ? (strategy.netprofit / totalTrades) : 0
+
+netProfitPercent = ((strategy.equity - strategy.initial_capital) / strategy.initial_capital) * 100
+
+avgReturn = totalTrades > 0 ? sumReturns / totalTrades : 0
+variance = totalTrades > 1 ? (sumReturnsSquared - (sumReturns * sumReturns / totalTrades)) / (totalTrades - 1) : 0
+stdDev = math.sqrt(variance)
+sharpeRatio = stdDev > 0 ? (avgReturn / stdDev) * math.sqrt(252) : 0
+
+recoveryFactor = maxDrawdown > 0 ? strategy.netprofit / maxDrawdown : 0
+calmarRatio = maxDrawdownPercent > 0 ? (netProfitPercent / maxDrawdownPercent) : 0
+
+// ═══════════════════════════════════════════════════════════════
+// ВИЗУАЛИЗАЦИЯ
+// ═══════════════════════════════════════════════════════════════
+
+plot(ema9, "EMA 9", color=color.yellow, linewidth=1)
+plot(ema21, "EMA 21", color=color.orange, linewidth=1)
+plot(ema50, "EMA 50", color=color.blue, linewidth=2)
+plot(vwap, "VWAP", color=color.purple, linewidth=2, style=plot.style_circles)
+
+slLongLine = strategy.position_size > 0 ? (useTrailingStop ? trailStopLong : longSL) : na
+slShortLine = strategy.position_size < 0 ? (useTrailingStop ? trailStopShort : shortSL) : na
+tpLongLine = strategy.position_size > 0 and not useTrailingStop ? longTP : na
+tpShortLine = strategy.position_size < 0 and not useTrailingStop ? shortTP : na
+
+plot(slLongLine, "Long SL", color=color.red, linewidth=1, style=plot.style_linebr)
+plot(tpLongLine, "Long TP", color=color.green, linewidth=1, style=plot.style_linebr)
+plot(slShortLine, "Short SL", color=color.red, linewidth=1, style=plot.style_linebr)
+plot(tpShortLine, "Short TP", color=color.green, linewidth=1, style=plot.style_linebr)
+
+bgCol = not inBacktestPeriod ? color.new(color.gray, 95) : strategy.position_size > 0 ? color.new(color.green, 90) : strategy.position_size < 0 ? color.new(color.red, 90) : na
+bgcolor(bgCol)
+
+if showTradeLabels and longSignal and strategy.position_size[1] == 0
+    label.new(bar_index, low, "L\n" + str.tostring(finalBullScore, "#.#"), 
+              style=label.style_label_up, color=color.green, textcolor=color.white, size=size.tiny)
+
+if showTradeLabels and shortSignal and strategy.position_size[1] == 0
+    label.new(bar_index, high, "S\n" + str.tostring(finalBearScore, "#.#"), 
+              style=label.style_label_down, color=color.red, textcolor=color.white, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════
+// ТАБЛИЦИ
+// ═══════════════════════════════════════════════════════════════
+
+var table statsTable = table.new(position.top_right, 3, 25, bgcolor=color.new(color.black, 85), border_width=1, border_color=color.gray)
+
+table.cell(statsTable, 0, 0, "📊 BACKTEST RESULTS", text_color=color.yellow, text_size=size.normal, bgcolor=color.new(color.blue, 60))
+table.cell(statsTable, 1, 0, "", bgcolor=color.new(color.blue, 60))
+table.cell(statsTable, 2, 0, "", bgcolor=color.new(color.blue, 60))
+
+table.cell(statsTable, 0, 1, "💰 CAPITAL", text_color=color.aqua, text_size=size.tiny)
+table.cell(statsTable, 1, 1, "", text_size=size.tiny)
+table.cell(statsTable, 2, 1, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 2, "Initial Capital", text_color=color.gray, text_size=size.tiny)
+table.cell(statsTable, 1, 2, str.tostring(strategy.initial_capital, "#.##") + " USD", text_color=color.white, text_size=size.tiny)
+table.cell(statsTable, 2, 2, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 3, "Final Equity", text_color=color.gray, text_size=size.tiny)
+eqCol = strategy.equity > strategy.initial_capital ? color.lime : color.red
+table.cell(statsTable, 1, 3, str.tostring(strategy.equity, "#.##") + " USD", text_color=eqCol, text_size=size.tiny)
+table.cell(statsTable, 2, 3, str.tostring(netProfitPercent, "#.##") + "%", text_color=eqCol, text_size=size.tiny)
+
+table.cell(statsTable, 0, 4, "Net Profit", text_color=color.gray, text_size=size.tiny)
+npCol = strategy.netprofit > 0 ? color.lime : color.red
+table.cell(statsTable, 1, 4, str.tostring(strategy.netprofit, "#.##") + " USD", text_color=npCol, text_size=size.tiny)
+table.cell(statsTable, 2, 4, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 5, "📉 DRAWDOWN", text_color=color.aqua, text_size=size.tiny)
+table.cell(statsTable, 1, 5, "", text_size=size.tiny)
+table.cell(statsTable, 2, 5, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 6, "Max Drawdown", text_color=color.gray, text_size=size.tiny)
+ddCol = maxDrawdownPercent > 30 ? color.red : maxDrawdownPercent > 15 ? color.orange : color.yellow
+table.cell(statsTable, 1, 6, str.tostring(maxDrawdown, "#.##") + " USD", text_color=ddCol, text_size=size.tiny)
+table.cell(statsTable, 2, 6, str.tostring(maxDrawdownPercent, "#.##") + "%", text_color=ddCol, text_size=size.tiny)
+
+table.cell(statsTable, 0, 7, "Current Drawdown", text_color=color.gray, text_size=size.tiny)
+table.cell(statsTable, 1, 7, str.tostring(currentDrawdown, "#.##") + " USD", text_color=color.orange, text_size=size.tiny)
+table.cell(statsTable, 2, 7, str.tostring(currentDrawdownPercent, "#.##") + "%", text_color=color.orange, text_size=size.tiny)
+
+table.cell(statsTable, 0, 8, "📈 TRADES", text_color=color.aqua, text_size=size.tiny)
+table.cell(statsTable, 1, 8, "", text_size=size.tiny)
+table.cell(statsTable, 2, 8, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 9, "Total Trades", text_color=color.gray, text_size=size.tiny)
+table.cell(statsTable, 1, 9, str.tostring(totalTrades), text_color=color.white, text_size=size.tiny)
+table.cell(statsTable, 2, 9, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 10, "Winning / Losing", text_color=color.gray, text_size=size.tiny)
+table.cell(statsTable, 1, 10, str.tostring(winningTrades) + " / " + str.tostring(losingTrades), text_color=color.white, text_size=size.tiny)
+table.cell(statsTable, 2, 10, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 11, "Win Rate", text_color=color.gray, text_size=size.tiny)
+wrCol = winRate > 50 ? color.lime : winRate > 40 ? color.yellow : color.red
+table.cell(statsTable, 1, 11, str.tostring(winRate, "#.##") + "%", text_color=wrCol, text_size=size.tiny)
+table.cell(statsTable, 2, 11, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 12, "Long Trades (Win%)", text_color=color.gray, text_size=size.tiny)
+table.cell(statsTable, 1, 12, str.tostring(longTrades) + " (" + str.tostring(longWinRate, "#.#") + "%)", text_color=color.green, text_size=size.tiny)
+table.cell(statsTable, 2, 12, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 13, "Short Trades (Win%)", text_color=color.gray, text_size=size.tiny)
+table.cell(statsTable, 1, 13, str.tostring(shortTrades) + " (" + str.tostring(shortWinRate, "#.#") + "%)", text_color=color.red, text_size=size.tiny)
+table.cell(statsTable, 2, 13, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 14, "📊 RATIOS", text_color=color.aqua, text_size=size.tiny)
+table.cell(statsTable, 1, 14, "", text_size=size.tiny)
+table.cell(statsTable, 2, 14, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 15, "Profit Factor", text_color=color.gray, text_size=size.tiny)
+pfCol = profitFactor > 1.5 ? color.lime : profitFactor > 1.0 ? color.yellow : color.red
+table.cell(statsTable, 1, 15, str.tostring(profitFactor, "#.##"), text_color=pfCol, text_size=size.tiny)
+table.cell(statsTable, 2, 15, profitFactor > 1.5 ? "✓ Good" : profitFactor > 1.0 ? "○ OK" : "✗ Bad", text_color=pfCol, text_size=size.tiny)
+
+table.cell(statsTable, 0, 16, "Risk/Reward", text_color=color.gray, text_size=size.tiny)
+rrCol = riskRewardRatio > 1.5 ? color.lime : riskRewardRatio > 1.0 ? color.yellow : color.red
+table.cell(statsTable, 1, 16, str.tostring(riskRewardRatio, "#.##"), text_color=rrCol, text_size=size.tiny)
+table.cell(statsTable, 2, 16, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 17, "Expectancy", text_color=color.gray, text_size=size.tiny)
+expCol = expectancy > 0 ? color.lime : color.red
+table.cell(statsTable, 1, 17, str.tostring(expectancy, "#.##") + " USD", text_color=expCol, text_size=size.tiny)
+table.cell(statsTable, 2, 17, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 18, "Sharpe Ratio", text_color=color.gray, text_size=size.tiny)
+srCol = sharpeRatio > 1 ? color.lime : sharpeRatio > 0 ? color.yellow : color.red
+table.cell(statsTable, 1, 18, str.tostring(sharpeRatio, "#.##"), text_color=srCol, text_size=size.tiny)
+table.cell(statsTable, 2, 18, sharpeRatio > 2 ? "✓ Great" : sharpeRatio > 1 ? "○ Good" : "✗ Poor", text_color=srCol, text_size=size.tiny)
+
+table.cell(statsTable, 0, 19, "Recovery Factor", text_color=color.gray, text_size=size.tiny)
+rfCol = recoveryFactor > 2 ? color.lime : recoveryFactor > 1 ? color.yellow : color.red
+table.cell(statsTable, 1, 19, str.tostring(recoveryFactor, "#.##"), text_color=rfCol, text_size=size.tiny)
+table.cell(statsTable, 2, 19, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 20, "📋 DETAILS", text_color=color.aqua, text_size=size.tiny)
+table.cell(statsTable, 1, 20, "", text_size=size.tiny)
+table.cell(statsTable, 2, 20, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 21, "Avg Win / Avg Loss", text_color=color.gray, text_size=size.tiny)
+table.cell(statsTable, 1, 21, str.tostring(avgWin, "#.##") + " / " + str.tostring(avgLoss, "#.##"), text_color=color.white, text_size=size.tiny)
+table.cell(statsTable, 2, 21, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 22, "Largest Win", text_color=color.gray, text_size=size.tiny)
+table.cell(statsTable, 1, 22, str.tostring(largestWin, "#.##") + " USD", text_color=color.lime, text_size=size.tiny)
+table.cell(statsTable, 2, 22, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 23, "Largest Loss", text_color=color.gray, text_size=size.tiny)
+table.cell(statsTable, 1, 23, str.tostring(largestLoss, "#.##") + " USD", text_color=color.red, text_size=size.tiny)
+table.cell(statsTable, 2, 23, "", text_size=size.tiny)
+
+table.cell(statsTable, 0, 24, "Max Consec. Win/Loss", text_color=color.gray, text_size=size.tiny)
+table.cell(statsTable, 1, 24, str.tostring(maxConsecutiveWins) + " / " + str.tostring(maxConsecutiveLosses), text_color=color.white, text_size=size.tiny)
+table.cell(statsTable, 2, 24, "", text_size=size.tiny)
+
+var table posTable = table.new(position.bottom_right, 2, 9, bgcolor=color.new(color.black, 85), border_width=1, border_color=color.gray)
+
+table.cell(posTable, 0, 0, "🎯 CURRENT", text_color=color.yellow, text_size=size.small, bgcolor=color.new(color.purple, 60))
+table.cell(posTable, 1, 0, "", bgcolor=color.new(color.purple, 60))
+
+posText = strategy.position_size > 0 ? "LONG ▲" : strategy.position_size < 0 ? "SHORT ▼" : "FLAT ●"
+posColor = strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.gray
+table.cell(posTable, 0, 1, "Position", text_color=color.gray, text_size=size.tiny)
+table.cell(posTable, 1, 1, posText, text_color=posColor, text_size=size.tiny)
+
+table.cell(posTable, 0, 2, "Entry Price", text_color=color.gray, text_size=size.tiny)
+entryText = strategy.position_size != 0 ? str.tostring(strategy.position_avg_price, "#.##") : "—"
+table.cell(posTable, 1, 2, entryText, text_color=color.white, text_size=size.tiny)
+
+unrealizedPnL = strategy.position_size != 0 ? strategy.openprofit : 0
+pnlColor = unrealizedPnL > 0 ? color.lime : unrealizedPnL < 0 ? color.red : color.gray
+table.cell(posTable, 0, 3, "Open P/L", text_color=color.gray, text_size=size.tiny)
+table.cell(posTable, 1, 3, str.tostring(unrealizedPnL, "#.##") + " USD", text_color=pnlColor, text_size=size.tiny)
+
+table.cell(posTable, 0, 4, "Trail Stop %", text_color=color.gray, text_size=size.tiny)
+table.cell(posTable, 1, 4, str.tostring(trailPercent, "#.#") + "%", text_color=color.yellow, text_size=size.tiny)
+
+table.cell(posTable, 0, 5, "Bull Score", text_color=color.gray, text_size=size.tiny)
+bsCol = finalBullScore >= minScore ? color.lime : color.white
+table.cell(posTable, 1, 5, str.tostring(finalBullScore, "#.#"), text_color=bsCol, text_size=size.tiny)
+
+table.cell(posTable, 0, 6, "Bear Score", text_color=color.gray, text_size=size.tiny)
+brsCol = finalBearScore >= minScore ? color.red : color.white
+table.cell(posTable, 1, 6, str.tostring(finalBearScore, "#.#"), text_color=brsCol, text_size=size.tiny)
+
+table.cell(posTable, 0, 7, "Volume", text_color=color.gray, text_size=size.tiny)
+vCol = isHighVolume ? color.lime : color.white
+table.cell(posTable, 1, 7, str.tostring(volumeRatio, "#.##") + "x", text_color=vCol, text_size=size.tiny)
+
+table.cell(posTable, 0, 8, "RSI", text_color=color.gray, text_size=size.tiny)
+rsiCol = rsi > rsiOB ? color.red : rsi < rsiOS ? color.green : color.white
+table.cell(posTable, 1, 8, str.tostring(rsi, "#.#"), text_color=rsiCol, text_size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════
+// DATA WINDOW
+// ═══════════════════════════════════════════════════════════════
+
+plot(finalBullScore, "Bull Score", display=display.data_window)
+plot(finalBearScore, "Bear Score", display=display.data_window)
+plot(volumeRatio, "Volume Ratio", display=display.data_window)
+plot(strategy.equity, "Equity", display=display.data_window)
+plot(currentDrawdownPercent, "Drawdown %", display=display.data_window)
+plot(winRate, "Win Rate %", display=display.data_window)
+plot(profitFactor, "Profit Factor", display=display.data_window)
+plot(trailPointsValue, "Trail Points", display=display.data_window)

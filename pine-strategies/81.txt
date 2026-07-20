@@ -1,0 +1,112 @@
+//@version=6
+strategy(title="Bitget BB Breakout Strategy [1 Entry Per N Seconds]", shorttitle="BB-Bitget", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_order_fills=false, calc_on_every_tick=false, process_orders_on_close=true)
+
+// === BACKTEST RANGE ===
+fromDate = input.time(timestamp("2024-01-01 00:00 +0000"), "From Date")
+toDate   = input.time(timestamp("2030-01-01 00:00 +0000"), "To Date")
+inDateRange = time >= fromDate and time <= toDate
+
+// === DELAY FILTERS ===
+delay_group = "Delay Filters"
+delay_htf = input.timeframe("10s", title="Delay Calculation Timeframe", group=delay_group)
+delay_type = input.string("Bars", title="Delay Type", options=["Bars", "Seconds"], group=delay_group)
+delay_bars = input.int(5, title="Min Bars Between Same-Direction Trades", minval=0, group=delay_group)
+delay_seconds = input.int(50, title="Min Seconds Between Same-Direction Trades", minval=1, group=delay_group)
+loss_delay_bars = input.int(5, title="Bars to Wait After Loss", minval=0, group=delay_group)
+loss_delay_seconds = input.int(50, title="Seconds to Wait After Loss", minval=1, group=delay_group)
+
+// === BOLLINGER BAND SETTINGS ===
+length = input.int(100, title="BB Length", minval=1)
+mult   = input.float(1.5, title="BB StdDev", step=0.1)
+basis  = ta.ema(close, length)
+dev    = mult * ta.stdev(close, length)
+upper  = basis + dev
+lower  = basis - dev
+
+// === EMA & SAR FILTERS ===
+useEMA      = input.bool(true, title="Enable EMA Filter")
+emaPeriod   = input.int(100, title="EMA Period")
+ema         = ta.ema(close, emaPeriod)
+
+useSAR      = input.bool(true, title="Enable Parabolic SAR")
+sarStart    = input.float(0.1, title="SAR Start", step=0.1)
+sarStep     = input.float(0.3, title="SAR Step", step=0.1)
+sarMax      = input.float(1.0, title="SAR Max", step=0.1)
+sar         = ta.sar(sarStart * 0.01, sarStep * 0.01, sarMax * 0.1)
+
+// === STRATEGY CONTROLS ===
+sl_percent  = input.float(1.0, title="Stop-Loss %", step=0.001)
+tp_enabled  = input.bool(false, title="Enable Take-Profit")
+tp_percent  = input.float(2.0, title="Take-Profit %", step=0.1)
+reversible  = input.bool(true, title="Reversible Mode (TP + Opposite Signal Entry)")
+
+// === COOLDOWN CONTROL ===
+cooldownSec = input.int(30, "Cooldown Period (seconds)", minval=1)
+timeNow = request.security(syminfo.tickerid, "1S", time)
+var int lastTradeTime = na
+canTrade = na(lastTradeTime) or (timeNow - lastTradeTime >= cooldownSec * 1000)
+
+// === POSITION CONDITIONS ===
+longCondition  = (not useEMA or close > ema) and close > upper
+shortCondition = (not useEMA or close < ema) and close < lower
+
+// === STOP & TP PRICING ===
+sl_long  = close * (1 - sl_percent / 100)
+sl_short = close * (1 + sl_percent / 100)
+tp_long  = close * (1 + tp_percent / 100)
+tp_short = close * (1 - tp_percent / 100)
+
+// === DELAY LOGIC ===
+htf_index = request.security(syminfo.tickerid, delay_htf, bar_index, lookahead=barmerge.lookahead_on)
+
+get_delay_bars(seconds) =>
+    seconds_per_bar = switch delay_htf
+        "5s" => 5
+        "10s" => 10
+        "15s" => 15
+        "30s" => 30
+        "1m" => 60
+        => 60
+    math.ceil(seconds / seconds_per_bar)
+
+delay_val = delay_type == "Bars" ? delay_bars : get_delay_bars(delay_seconds)
+loss_delay_val = delay_type == "Bars" ? loss_delay_bars : get_delay_bars(loss_delay_seconds)
+
+var int last_long_trade = na
+var int last_short_trade = na
+var int last_loss_long = na
+var int last_loss_short = na
+var int prev_trade_dir = na
+
+can_long_delay = na(last_long_trade) or (htf_index - last_long_trade) >= delay_val
+can_short_delay = na(last_short_trade) or (htf_index - last_short_trade) >= delay_val
+can_long_loss = na(last_loss_long) or (htf_index - last_loss_long) >= loss_delay_val
+can_short_loss = na(last_loss_short) or (htf_index - last_loss_short) >= loss_delay_val
+
+can_long = can_long_delay and can_long_loss
+can_short = can_short_delay and can_short_loss
+
+// === STRATEGY LOGIC ===
+if inDateRange and canTrade
+    if longCondition
+        strategy.close("Sell Short", comment="close_S")
+        strategy.entry("Buy Long", strategy.long, comment="Buy Long")
+        lastTradeTime := timeNow
+
+    if shortCondition
+        strategy.close("Buy Long", comment="close_L")
+        strategy.entry("Sell Short", strategy.short, comment="Buy Short")
+        lastTradeTime := timeNow
+
+// === STRATEGY EXITS ===
+if strategy.position_size > 0
+    strategy.exit("Sell Long", from_entry="Buy Long", stop=sl_long, limit=tp_enabled ? tp_long : na, comment="Sell Long")
+if strategy.position_size < 0
+    strategy.exit("Buy Short", from_entry="Sell Short", stop=sl_short, limit=tp_enabled ? tp_short : na, comment="Buy Short")
+
+// === PLOTS ===
+plot(basis, title="BB Basis", color=color.orange)
+plot(upper, title="BB Upper", color=color.blue)
+plot(lower, title="BB Lower", color=color.blue)
+plot(useEMA ? ema : na, title="EMA", color=color.green)
+plot(useSAR ? sar : na, title="Parabolic SAR", style=plot.style_cross, color=color.red)

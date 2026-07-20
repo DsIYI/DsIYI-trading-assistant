@@ -1,0 +1,167 @@
+//@version=6
+strategy(title="Supertrend Strategy (Intrabar) With Alerts & Enhancements",shorttitle="ST_Strategy_Enhanced",overlay=true,default_qty_type=strategy.percent_of_equity,default_qty_value=100,calc_on_every_tick=true,process_orders_on_close=false)
+
+//=============================================================================
+// 1) Time Window Filters
+//=============================================================================
+useTimeFilter = input.bool(true, title="Enable Time Filter?")
+FromMonth   = input.int(4,  title='From Month',    minval=1, maxval=12)
+FromDay     = input.int(17, title='From Day',      minval=1, maxval=31)
+FromYear    = input.int(2024, title='From Year',   minval=2024)
+ToMonth     = input.int(12,  title='To Month',     minval=1, maxval=12)
+ToDay       = input.int(31,  title='To Day',       minval=1, maxval=31)
+ToYear      = input.int(9999, title='To Year',     minval=2024)
+start  = timestamp(FromYear, FromMonth, FromDay, 0, 0)
+finish = timestamp(ToYear,   ToMonth,   ToDay,   23, 59)
+timeFilterPass = not useTimeFilter or (time >= start and time <= finish)
+
+//=============================================================================
+// 2) Primary Supertrend (Signal Generator)
+//=============================================================================
+useSupertrend  = input.bool(true, title="Enable Supertrend Filter?")
+atrPeriod1     = input.int(7,   title='Signal ATR Length')
+factor1        = input.float(0.5, title='Signal Supertrend Factor', step=0.01)
+[superTrend1, direction1] = ta.supertrend(factor1, atrPeriod1)
+supertrendLong  = ta.change(direction1) < 0
+supertrendShort = ta.change(direction1) > 0
+supertrendPassLong  = not useSupertrend or supertrendLong
+supertrendPassShort = not useSupertrend or supertrendShort
+
+//=============================================================================
+// 3) Trend Filter (Secondary Supertrend)
+//=============================================================================
+useTrendFilter = input.bool(true, title="Enable Trend Filter?")
+atrPeriod2     = input.int(10, title='Trend ATR Length')
+factor2        = input.float(3.0, title='Trend Supertrend Factor')
+[trendSupertrend, trendDir] = ta.supertrend(factor2, atrPeriod2)
+trendUp   = trendDir < 0
+trendDown = trendDir > 0
+trendPassLong  = not useTrendFilter or trendUp
+trendPassShort = not useTrendFilter or trendDown
+
+//=============================================================================
+// 4) EMA Filter
+//=============================================================================
+useEMAFilter = input.bool(true, title="Enable EMA Filter?")
+ema2mLen = input.int(9, 'EMA Length (2m)')
+ema5mLen = input.int(9, 'EMA Length (5m)')
+ema2m = ta.ema(close, ema2mLen)
+ema5m = ta.ema(close, ema5mLen)
+emaPassLong  = not useEMAFilter or (close > ema2m and close > ema5m)
+emaPassShort = not useEMAFilter or (close < ema2m and close < ema5m)
+
+//=============================================================================
+// 5) Volume Filter
+//=============================================================================
+useVolumeFilter = input.bool(true, title="Enable Volume Filter?")
+volumeLookback = input.int(50, 'Volume Lookback')
+avgVol = ta.sma(volume, volumeLookback)
+volumePass = not useVolumeFilter or volume > avgVol
+
+//=============================================================================
+// 6) RSI Filter
+//=============================================================================
+useRSIFilter = input.bool(false, title="Enable RSI Filter?")
+rsiLength = input.int(14, title="RSI Length")
+rsiOB = input.int(70, title="Overbought")
+rsiOS = input.int(30, title="Oversold")
+rsiVal = ta.rsi(close, rsiLength)
+rsiPassLong  = not useRSIFilter or rsiVal < rsiOS
+rsiPassShort = not useRSIFilter or rsiVal > rsiOB
+
+//=============================================================================
+// 7) Take-Profit Mode (Switchable)
+//=============================================================================
+tpMode = input.string("percentage", title="Take-Profit Mode", options=["percentage", "opposite", "reversible"])
+tpPerc = input.float(0.99, title="Profit % for TP", step=0.1)
+
+//=============================================================================
+// 8) Bar Delay Logic (Seconds or Bar Count)
+//=============================================================================
+delayMode = input.string("seconds", title="Delay Type", options=["seconds", "bars"])
+delayValue = input.int(0, title="Delay (Seconds or Bars)", minval=0)
+var float exitTime = na
+var bool allowEntry = true
+
+if strategy.opentrades == 0
+    allowEntry := true
+else if not na(exitTime)
+    allowEntry := (delayMode == "seconds" and time >= exitTime) or (delayMode == "bars" and bar_index >= exitTime)
+
+//=============================================================================
+// 9) Entry Conditions
+//=============================================================================
+candleIsGreen = close > open
+candleIsRed = close < open
+finalLong = candleIsGreen and supertrendPassLong and trendPassLong and emaPassLong and volumePass and rsiPassLong and timeFilterPass and allowEntry
+finalShort = candleIsRed and supertrendPassShort and trendPassShort and emaPassShort and volumePass and rsiPassShort and timeFilterPass and allowEntry
+
+//=============================================================================
+// 10) Position Management (TP/Exit/Reverse)
+//=============================================================================
+entryPrice = strategy.position_avg_price
+longTP = entryPrice * (1 + tpPerc / 100)
+shortTP = entryPrice * (1 - tpPerc / 100)
+
+// Exit logic
+if tpMode == "percentage"
+    if strategy.position_size > 0 and close >= longTP
+        strategy.close("Long Entry", comment="TP Long")
+        exitTime := delayMode == "seconds" ? time + delayValue * 1000 : bar_index + delayValue
+    if strategy.position_size < 0 and close <= shortTP
+        strategy.close("Short Entry", comment="TP Short")
+        exitTime := delayMode == "seconds" ? time + delayValue * 1000 : bar_index + delayValue
+
+if tpMode == "opposite"
+    if finalShort and strategy.position_size > 0
+        strategy.close("Long Entry", comment="Opp Signal TP")
+        exitTime := delayMode == "seconds" ? time + delayValue * 1000 : bar_index + delayValue
+    if finalLong and strategy.position_size < 0
+        strategy.close("Short Entry", comment="Opp Signal TP")
+        exitTime := delayMode == "seconds" ? time + delayValue * 1000 : bar_index + delayValue
+
+if tpMode == "reversible"
+    if finalShort and strategy.position_size > 0
+        strategy.close("Long Entry", comment="Reverse TP")
+        exitTime := delayMode == "seconds" ? time + delayValue * 1000 : bar_index + delayValue
+        if allowEntry
+            strategy.entry("Short Entry", strategy.short)
+    if finalLong and strategy.position_size < 0
+        strategy.close("Short Entry", comment="Reverse TP")
+        exitTime := delayMode == "seconds" ? time + delayValue * 1000 : bar_index + delayValue
+        if allowEntry
+            strategy.entry("Long Entry", strategy.long)
+
+// Regular entries
+if tpMode != "reversible"
+    if finalLong and strategy.position_size <= 0
+        strategy.entry("Long Entry", strategy.long)
+    if finalShort and strategy.position_size >= 0
+        strategy.entry("Short Entry", strategy.short)
+
+//=============================================================================
+// 11) Stop-Loss
+//=============================================================================
+useStopLoss = input.bool(true, title="Enable Stop-Loss?")
+stopLossPerc = input.float(2.0, title="Stop-Loss Percentage", step=0.1, minval=0.1)
+stopLossLong = entryPrice * (1 - stopLossPerc / 100)
+stopLossShort = entryPrice * (1 + stopLossPerc / 100)
+if useStopLoss and strategy.position_size > 0
+    strategy.exit("StopLoss", from_entry="Long Entry", stop=stopLossLong)
+if useStopLoss and strategy.position_size < 0
+    strategy.exit("StopLoss", from_entry="Short Entry", stop=stopLossShort)
+
+//=============================================================================
+// 12) Alerts (Webhook Ready)
+//=============================================================================
+alertLongOpen  = '{ "action": "open_long", "symbol": "SOLUSDT.P", "quantityPercent": 100, "timestamp": "{{timenow}}", "price": "{{close}}" }'
+alertShortOpen = '{ "action": "open_short", "symbol": "SOLUSDT.P", "quantityPercent": 100, "timestamp": "{{timenow}}", "price": "{{close}}" }'
+alertLongClose = '{ "action": "close_long", "symbol": "SOLUSDT.P", "quantityPercent": 100, "timestamp": "{{timenow}}", "price": "{{close}}" }'
+alertShortClose= '{ "action": "close_short", "symbol": "SOLUSDT.P", "quantityPercent": 100, "timestamp": "{{timenow}}", "price": "{{close}}" }'
+
+if finalLong
+    alert(alertShortClose, alert.freq_all)
+    alert(alertLongOpen, alert.freq_all)
+if finalShort
+    alert(alertLongClose, alert.freq_all)
+    alert(alertShortOpen, alert.freq_all)

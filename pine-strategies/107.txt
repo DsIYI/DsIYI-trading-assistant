@@ -1,0 +1,544 @@
+//@version=5
+strategy("Crypto Hunter PRO [BACKTEST]", 
+         overlay=true, 
+         initial_capital=100,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=100,
+         commission_type=strategy.commission.percent,
+         commission_value=0.06,
+         slippage=2,
+         pyramiding=0,
+         calc_on_every_tick=false,
+         process_orders_on_close=true,
+         max_bars_back=5000)
+
+// ═══════════════════════════════════════════════════════════════
+// BACKTEST НАСТРОЙКИ
+// ═══════════════════════════════════════════════════════════════
+grpBacktest = "📅 BACKTEST ПЕРИОД"
+useBacktestPeriod = input.bool(true, "Използвай Backtest Период", group=grpBacktest)
+startDate = input.time(timestamp("2024-01-01 00:00"), "Начална дата", group=grpBacktest)
+endDate = input.time(timestamp("2025-12-31 23:59"), "Крайна дата", group=grpBacktest)
+
+grpCapital = "💰 КАПИТАЛ"
+initialCapital = input.float(100, "Начален капитал (USDT)", minval=10, group=grpCapital)
+leverage = input.float(10, "Leverage (x)", minval=1, maxval=125, group=grpCapital)
+useCompounding = input.bool(true, "Compounding (реинвестирай печалби)", group=grpCapital)
+
+grpRisk = "⚠️ RISK MANAGEMENT"
+atrMultSL = input.float(1.5, "ATR за SL", minval=0.5, maxval=5.0, group=grpRisk)
+atrMultTP1 = input.float(2.0, "ATR за TP1", minval=1.0, maxval=5.0, group=grpRisk)
+atrMultTP2 = input.float(3.0, "ATR за TP2", minval=1.5, maxval=8.0, group=grpRisk)
+atrMultTP3 = input.float(5.0, "ATR за TP3", minval=2.0, maxval=12.0, group=grpRisk)
+useTrailingStop = input.bool(true, "Trailing Stop след TP1", group=grpRisk)
+trailPercent = input.float(1.5, "Trailing %", minval=0.1, maxval=5.0, group=grpRisk)
+tp1ClosePercent = input.float(40, "TP1 затвори %", minval=10, maxval=100, group=grpRisk)
+tp2ClosePercent = input.float(30, "TP2 затвори %", minval=0, maxval=100, group=grpRisk)
+
+grp1 = "🕯️ СВЕЩЕН АНАЛИЗ"
+lookback = input.int(14, "Период", minval=5, maxval=50, group=grp1)
+bodyMultiplier = input.float(1.5, "Голяма свещ (x)", minval=1.0, maxval=3.0, group=grp1)
+dojiThreshold = input.float(0.1, "Doji праг", minval=0.01, maxval=0.2, group=grp1)
+engulfingStrength = input.float(1.05, "Engulfing сила", minval=1.0, maxval=2.0, group=grp1)
+
+grp2 = "📊 ОБЕМ"
+volMultiplier = input.float(1.5, "Висок обем (x)", minval=1.0, maxval=3.0, group=grp2)
+volLookback = input.int(20, "Период за обем", minval=5, maxval=100, group=grp2)
+
+grp3 = "📈 MOMENTUM"
+rsiLength = input.int(14, "RSI период", minval=5, maxval=30, group=grp3)
+rsiOverbought = input.int(70, "RSI Overbought", minval=60, maxval=90, group=grp3)
+rsiOversold = input.int(30, "RSI Oversold", minval=10, maxval=40, group=grp3)
+
+grp4 = "📉 ТРЕНД"
+emaFast = input.int(9, "EMA Fast", minval=3, maxval=50, group=grp4)
+emaSlow = input.int(21, "EMA Slow", minval=10, maxval=100, group=grp4)
+emaTrend = input.int(50, "EMA Trend", minval=20, maxval=200, group=grp4)
+useTrendFilter = input.bool(true, "Тренд филтър", group=grp4)
+
+grp5 = "🏗️ MARKET STRUCTURE"
+useMarketStructure = input.bool(true, "Market Structure", group=grp5)
+swingLookback = input.int(10, "Swing Lookback", minval=3, maxval=30, group=grp5)
+
+grp6 = "⏰ MULTI-TIMEFRAME"
+useMTF = input.bool(true, "MTF анализ", group=grp6)
+htfTimeframe = input.timeframe("60", "HTF", group=grp6)
+
+grp8 = "🎯 СИГНАЛИ"
+minScore = input.float(5.0, "Мин. скор", minval=1.0, maxval=20.0, group=grp8)
+strongSignalScore = input.float(8.0, "Силен сигнал", minval=5.0, maxval=25.0, group=grp8)
+useConfluence = input.bool(true, "Конфлуенция", group=grp8)
+minConfluence = input.int(3, "Мин. конфлуенция", minval=1, maxval=10, group=grp8)
+
+grp10 = "🎨 ВИЗУАЛИЗАЦИЯ"
+showEMAs = input.bool(true, "EMAs", group=grp10)
+showTable = input.bool(true, "Таблица", group=grp10)
+showSLTP = input.bool(true, "SL/TP", group=grp10)
+colorBars = input.bool(true, "Оцвети свещи", group=grp10)
+showLabels = input.bool(true, "Trade Labels", group=grp10)
+
+// ═══════════════════════════════════════════════════════════════
+// BACKTEST ПЕРИОД
+// ═══════════════════════════════════════════════════════════════
+inBacktestPeriod = useBacktestPeriod ? (time >= startDate and time <= endDate) : true
+
+// ═══════════════════════════════════════════════════════════════
+// ИЗЧИСЛЕНИЯ
+// ═══════════════════════════════════════════════════════════════
+bodySize = math.abs(close - open)
+totalRange = high - low
+bodyToRange = totalRange > 0 ? bodySize / totalRange : 0
+upperWickRatio = totalRange > 0 ? (high - math.max(close, open)) / totalRange : 0
+lowerWickRatio = totalRange > 0 ? (math.min(close, open) - low) / totalRange : 0
+
+avgBody = ta.sma(bodySize, lookback)
+avgVolume = ta.sma(volume, volLookback)
+atr = ta.atr(14)
+
+isBullish = close > open
+isBearish = close < open
+isLargeBody = bodySize > avgBody * bodyMultiplier
+isSmallBody = bodySize < avgBody * 0.5
+isDoji = bodyToRange < dojiThreshold
+isHighVolume = volume > avgVolume * volMultiplier
+isVeryHighVolume = volume > avgVolume * 2.0
+isLowVolume = volume < avgVolume * 0.5
+volumeRatio = avgVolume > 0 ? volume / avgVolume : 0
+
+// ═══════════════════════════════════════════════════════════════
+// ИНДИКАТОРИ
+// ═══════════════════════════════════════════════════════════════
+rsi = ta.rsi(close, rsiLength)
+rsiOB = rsi > rsiOverbought
+rsiOS = rsi < rsiOversold
+
+ema9 = ta.ema(close, emaFast)
+ema21 = ta.ema(close, emaSlow)
+ema50 = ta.ema(close, emaTrend)
+vwapVal = ta.vwap(hlc3)
+
+bullTrend = ema9 > ema21 and ema21 > ema50
+bearTrend = ema9 < ema21 and ema21 < ema50
+emaCrossUp = ta.crossover(ema9, ema21)
+emaCrossDown = ta.crossunder(ema9, ema21)
+
+[macdLine, signalLine, hist] = ta.macd(close, 12, 26, 9)
+macdBullish = macdLine > signalLine
+macdCrossUp = ta.crossover(macdLine, signalLine)
+macdCrossDown = ta.crossunder(macdLine, signalLine)
+
+stochK = ta.sma(ta.stoch(close, high, low, 14), 3)
+stochD = ta.sma(stochK, 3)
+stochBullish = stochK > stochD
+
+[supertrend, dir] = ta.supertrend(3, 10)
+stBullish = dir < 0
+
+// ═══════════════════════════════════════════════════════════════
+// MTF
+// ═══════════════════════════════════════════════════════════════
+htfClose = request.security(syminfo.tickerid, htfTimeframe, close)
+htfEma21 = request.security(syminfo.tickerid, htfTimeframe, ta.ema(close, 21))
+htfEma50 = request.security(syminfo.tickerid, htfTimeframe, ta.ema(close, 50))
+htfTrendUp = htfClose > htfEma21 and htfEma21 > htfEma50
+htfTrendDown = htfClose < htfEma21 and htfEma21 < htfEma50
+
+// ═══════════════════════════════════════════════════════════════
+// MARKET STRUCTURE
+// ═══════════════════════════════════════════════════════════════
+swingHigh = ta.pivothigh(high, swingLookback, swingLookback)
+swingLow = ta.pivotlow(low, swingLookback, swingLookback)
+
+var float lastSwingHigh = na
+var float lastSwingLow = na
+var float prevSwingHigh = na
+var float prevSwingLow = na
+
+if not na(swingHigh)
+    prevSwingHigh := lastSwingHigh
+    lastSwingHigh := swingHigh
+
+if not na(swingLow)
+    prevSwingLow := lastSwingLow
+    lastSwingLow := swingLow
+
+higherHigh = not na(lastSwingHigh) and not na(prevSwingHigh) and lastSwingHigh > prevSwingHigh
+higherLow = not na(lastSwingLow) and not na(prevSwingLow) and lastSwingLow > prevSwingLow
+lowerHigh = not na(lastSwingHigh) and not na(prevSwingHigh) and lastSwingHigh < prevSwingHigh
+lowerLow = not na(lastSwingLow) and not na(prevSwingLow) and lastSwingLow < prevSwingLow
+
+uptrendStructure = higherHigh and higherLow
+downtrendStructure = lowerHigh and lowerLow
+bosUp = not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
+bosDown = not na(lastSwingLow) and close < lastSwingLow and close[1] >= lastSwingLow
+
+// ═══════════════════════════════════════════════════════════════
+// СВЕЩНИ МОДЕЛИ
+// ═══════════════════════════════════════════════════════════════
+isHammer = lowerWickRatio > 0.6 and upperWickRatio < 0.15 and bodyToRange < 0.35 and bodyToRange > 0.05
+isShootingStar = upperWickRatio > 0.6 and lowerWickRatio < 0.15 and bodyToRange < 0.35
+isPinBull = lowerWickRatio > 0.65 and bodyToRange < 0.25 and upperWickRatio < 0.1
+isPinBear = upperWickRatio > 0.65 and bodyToRange < 0.25 and lowerWickRatio < 0.1
+isMaruBull = isBullish and bodyToRange > 0.9 and isLargeBody
+isMaruBear = isBearish and bodyToRange > 0.9 and isLargeBody
+isDojiFly = isDoji and lowerWickRatio > 0.6
+isDojiGrave = isDoji and upperWickRatio > 0.6
+
+prevBody = math.abs(close[1] - open[1])
+prevMid = (open[1] + close[1]) / 2
+isBullEngulf = isBullish and isBearish[1] and open <= close[1] and close >= open[1] and bodySize > prevBody * engulfingStrength
+isBearEngulf = isBearish and isBullish[1] and open >= close[1] and close <= open[1] and bodySize > prevBody * engulfingStrength
+isPiercing = isBullish and isBearish[1] and open < low[1] and close > prevMid
+isDarkCloud = isBearish and isBullish[1] and open > high[1] and close < prevMid
+isTweezerBottom = math.abs(low - low[1]) < atr * 0.05 and isBullish and isBearish[1]
+isTweezerTop = math.abs(high - high[1]) < atr * 0.05 and isBearish and isBullish[1]
+
+prev2Mid = (open[2] + close[2]) / 2
+isMorningStar = isBearish[2] and isLargeBody[2] and (isDoji[1] or isSmallBody[1]) and isBullish and close > prev2Mid
+isEveningStar = isBullish[2] and isLargeBody[2] and (isDoji[1] or isSmallBody[1]) and isBearish and close < prev2Mid
+isThreeWhiteSoldiers = isBullish and isBullish[1] and isBullish[2] and close > close[1] and close[1] > close[2]
+isThreeBlackCrows = isBearish and isBearish[1] and isBearish[2] and close < close[1] and close[1] < close[2]
+
+// ═══════════════════════════════════════════════════════════════
+// СКОРИНГ
+// ═══════════════════════════════════════════════════════════════
+bullScore = 0.0
+bullScore := bullScore + (isHammer ? 2.5 : 0)
+bullScore := bullScore + (isPinBull ? 3.0 : 0)
+bullScore := bullScore + (isMaruBull ? 3.5 : 0)
+bullScore := bullScore + (isDojiFly ? 2.0 : 0)
+bullScore := bullScore + (isBullEngulf ? 4.0 : 0)
+bullScore := bullScore + (isPiercing ? 3.0 : 0)
+bullScore := bullScore + (isTweezerBottom ? 3.0 : 0)
+bullScore := bullScore + (isMorningStar ? 5.0 : 0)
+bullScore := bullScore + (isThreeWhiteSoldiers ? 4.5 : 0)
+
+bearScore = 0.0
+bearScore := bearScore + (isShootingStar ? 2.5 : 0)
+bearScore := bearScore + (isPinBear ? 3.0 : 0)
+bearScore := bearScore + (isMaruBear ? 3.5 : 0)
+bearScore := bearScore + (isDojiGrave ? 2.0 : 0)
+bearScore := bearScore + (isBearEngulf ? 4.0 : 0)
+bearScore := bearScore + (isDarkCloud ? 3.0 : 0)
+bearScore := bearScore + (isTweezerTop ? 3.0 : 0)
+bearScore := bearScore + (isEveningStar ? 5.0 : 0)
+bearScore := bearScore + (isThreeBlackCrows ? 4.5 : 0)
+
+// Модификатори
+volMod = isVeryHighVolume ? 2.0 : isHighVolume ? 1.5 : isLowVolume ? 0.5 : 1.0
+rsiBullMod = rsiOS ? 1.8 : rsi < 40 ? 1.3 : rsiOB ? 0.6 : 1.0
+rsiBearMod = rsiOB ? 1.8 : rsi > 60 ? 1.3 : rsiOS ? 0.6 : 1.0
+trendBullMod = useTrendFilter ? (bullTrend ? 1.4 : bearTrend ? 0.5 : 1.0) : 1.0
+trendBearMod = useTrendFilter ? (bearTrend ? 1.4 : bullTrend ? 0.5 : 1.0) : 1.0
+vwapBullMod = close < vwapVal ? 1.3 : 1.0
+vwapBearMod = close > vwapVal ? 1.3 : 1.0
+emaCrossBullMod = emaCrossUp ? 1.8 : 1.0
+emaCrossBearMod = emaCrossDown ? 1.8 : 1.0
+macdBullMod = macdCrossUp ? 1.5 : macdBullish ? 1.2 : 1.0
+macdBearMod = macdCrossDown ? 1.5 : not macdBullish ? 1.2 : 1.0
+structBullMod = useMarketStructure ? (bosUp ? 1.5 : uptrendStructure ? 1.2 : 1.0) : 1.0
+structBearMod = useMarketStructure ? (bosDown ? 1.5 : downtrendStructure ? 1.2 : 1.0) : 1.0
+mtfBullMod = useMTF ? (htfTrendUp ? 1.4 : htfTrendDown ? 0.6 : 1.0) : 1.0
+mtfBearMod = useMTF ? (htfTrendDown ? 1.4 : htfTrendUp ? 0.6 : 1.0) : 1.0
+
+finalBull = bullScore * volMod * rsiBullMod * trendBullMod * vwapBullMod * emaCrossBullMod * macdBullMod * structBullMod * mtfBullMod
+finalBear = bearScore * volMod * rsiBearMod * trendBearMod * vwapBearMod * emaCrossBearMod * macdBearMod * structBearMod * mtfBearMod
+
+// Конфлуенция
+bullConf = 0
+bullConf := bullConf + (bullScore > 0 ? 1 : 0)
+bullConf := bullConf + (isHighVolume ? 1 : 0)
+bullConf := bullConf + (rsiOS or rsi < 40 ? 1 : 0)
+bullConf := bullConf + (bullTrend ? 1 : 0)
+bullConf := bullConf + (close < vwapVal ? 1 : 0)
+bullConf := bullConf + (macdBullish ? 1 : 0)
+bullConf := bullConf + (stochBullish ? 1 : 0)
+bullConf := bullConf + (stBullish ? 1 : 0)
+bullConf := bullConf + (uptrendStructure ? 1 : 0)
+bullConf := bullConf + (htfTrendUp ? 1 : 0)
+
+bearConf = 0
+bearConf := bearConf + (bearScore > 0 ? 1 : 0)
+bearConf := bearConf + (isHighVolume ? 1 : 0)
+bearConf := bearConf + (rsiOB or rsi > 60 ? 1 : 0)
+bearConf := bearConf + (bearTrend ? 1 : 0)
+bearConf := bearConf + (close > vwapVal ? 1 : 0)
+bearConf := bearConf + (not macdBullish ? 1 : 0)
+bearConf := bearConf + (not stochBullish ? 1 : 0)
+bearConf := bearConf + (not stBullish ? 1 : 0)
+bearConf := bearConf + (downtrendStructure ? 1 : 0)
+bearConf := bearConf + (htfTrendDown ? 1 : 0)
+
+confOkBull = not useConfluence or bullConf >= minConfluence
+confOkBear = not useConfluence or bearConf >= minConfluence
+
+strongLong = finalBull >= strongSignalScore and confOkBull
+strongShort = finalBear >= strongSignalScore and confOkBear
+normalLong = finalBull >= minScore and finalBull < strongSignalScore and confOkBull
+normalShort = finalBear >= minScore and finalBear < strongSignalScore and confOkBear
+
+anyLong = strongLong or normalLong
+anyShort = strongShort or normalShort
+
+// ═══════════════════════════════════════════════════════════════
+// SL/TP ИЗЧИСЛЕНИЯ
+// ═══════════════════════════════════════════════════════════════
+longSL = close - atr * atrMultSL
+longTP1 = close + atr * atrMultTP1
+longTP2 = close + atr * atrMultTP2
+longTP3 = close + atr * atrMultTP3
+
+shortSL = close + atr * atrMultSL
+shortTP1 = close - atr * atrMultTP1
+shortTP2 = close - atr * atrMultTP2
+shortTP3 = close - atr * atrMultTP3
+
+// ═══════════════════════════════════════════════════════════════
+// STRATEGY EXECUTION
+// ═══════════════════════════════════════════════════════════════
+
+// Tracking variables
+var float entryPrice = na
+var float currentSL = na
+var float currentTP1 = na
+var float currentTP2 = na
+var float currentTP3 = na
+var bool tp1Hit = false
+var bool tp2Hit = false
+
+// Position size with leverage
+positionSizeLong = strategy.equity * leverage / close
+positionSizeShort = strategy.equity * leverage / close
+
+// LONG ENTRY
+if anyLong and strategy.position_size == 0 and inBacktestPeriod
+    strategy.entry("Long", strategy.long, qty=positionSizeLong, comment="L")
+    entryPrice := close
+    currentSL := longSL
+    currentTP1 := longTP1
+    currentTP2 := longTP2
+    currentTP3 := longTP3
+    tp1Hit := false
+    tp2Hit := false
+
+// SHORT ENTRY
+if anyShort and strategy.position_size == 0 and inBacktestPeriod
+    strategy.entry("Short", strategy.short, qty=positionSizeShort, comment="S")
+    entryPrice := close
+    currentSL := shortSL
+    currentTP1 := shortTP1
+    currentTP2 := shortTP2
+    currentTP3 := shortTP3
+    tp1Hit := false
+    tp2Hit := false
+
+// LONG EXIT MANAGEMENT
+if strategy.position_size > 0
+    // TP1 - Partial close
+    if not tp1Hit and high >= currentTP1
+        strategy.close("Long", qty_percent=tp1ClosePercent, comment="TP1")
+        tp1Hit := true
+        if useTrailingStop
+            currentSL := entryPrice  // Move to breakeven
+    
+    // TP2 - Partial close
+    if tp1Hit and not tp2Hit and high >= currentTP2
+        strategy.close("Long", qty_percent=tp2ClosePercent, comment="TP2")
+        tp2Hit := true
+    
+    // TP3 - Full close
+    if tp2Hit and high >= currentTP3
+        strategy.close("Long", comment="TP3")
+    
+    // SL Hit
+    if low <= currentSL
+        strategy.close("Long", comment="SL")
+    
+    // Reverse signal
+    if anyShort and inBacktestPeriod
+        strategy.close("Long", comment="REV")
+        strategy.entry("Short", strategy.short, qty=positionSizeShort, comment="S")
+        entryPrice := close
+        currentSL := shortSL
+        currentTP1 := shortTP1
+        currentTP2 := shortTP2
+        currentTP3 := shortTP3
+        tp1Hit := false
+        tp2Hit := false
+
+// SHORT EXIT MANAGEMENT
+if strategy.position_size < 0
+    // TP1 - Partial close
+    if not tp1Hit and low <= currentTP1
+        strategy.close("Short", qty_percent=tp1ClosePercent, comment="TP1")
+        tp1Hit := true
+        if useTrailingStop
+            currentSL := entryPrice  // Move to breakeven
+    
+    // TP2 - Partial close
+    if tp1Hit and not tp2Hit and low <= currentTP2
+        strategy.close("Short", qty_percent=tp2ClosePercent, comment="TP2")
+        tp2Hit := true
+    
+    // TP3 - Full close
+    if tp2Hit and low <= currentTP3
+        strategy.close("Short", comment="TP3")
+    
+    // SL Hit
+    if high >= currentSL
+        strategy.close("Short", comment="SL")
+    
+    // Reverse signal
+    if anyLong and inBacktestPeriod
+        strategy.close("Short", comment="REV")
+        strategy.entry("Long", strategy.long, qty=positionSizeLong, comment="L")
+        entryPrice := close
+        currentSL := longSL
+        currentTP1 := longTP1
+        currentTP2 := longTP2
+        currentTP3 := longTP3
+        tp1Hit := false
+        tp2Hit := false
+
+// Reset variables when flat
+if strategy.position_size == 0
+    entryPrice := na
+    currentSL := na
+    currentTP1 := na
+    currentTP2 := na
+    currentTP3 := na
+    tp1Hit := false
+    tp2Hit := false
+
+// ═══════════════════════════════════════════════════════════════
+// BACKTEST СТАТИСТИКИ
+// ═══════════════════════════════════════════════════════════════
+var float peakEquity = strategy.initial_capital
+var float maxDrawdown = 0.0
+var float maxDrawdownPct = 0.0
+
+peakEquity := math.max(peakEquity, strategy.equity)
+currentDrawdown = peakEquity - strategy.equity
+currentDrawdownPct = peakEquity > 0 ? (currentDrawdown / peakEquity) * 100 : 0
+maxDrawdown := math.max(maxDrawdown, currentDrawdown)
+maxDrawdownPct := math.max(maxDrawdownPct, currentDrawdownPct)
+
+winRate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0
+profitFactor = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : strategy.grossprofit > 0 ? 999 : 0
+netProfitPct = ((strategy.equity - strategy.initial_capital) / strategy.initial_capital) * 100
+
+// ═══════════════════════════════════════════════════════════════
+// ВИЗУАЛИЗАЦИЯ
+// ═══════════════════════════════════════════════════════════════
+
+// EMAs
+plot(showEMAs ? ema9 : na, "EMA9", color.yellow, 1)
+plot(showEMAs ? ema21 : na, "EMA21", color.orange, 1)
+plot(showEMAs ? ema50 : na, "EMA50", color.blue, 2)
+
+// SL/TP Lines
+inPosition = strategy.position_size != 0
+plot(showSLTP and inPosition ? entryPrice : na, "Entry", color.white, 1, plot.style_circles)
+plot(showSLTP and inPosition ? currentSL : na, "SL", color.red, 2, plot.style_cross)
+plot(showSLTP and inPosition ? currentTP1 : na, "TP1", color.green, 1, plot.style_cross)
+plot(showSLTP and inPosition ? currentTP2 : na, "TP2", color.lime, 1, plot.style_cross)
+plot(showSLTP and inPosition ? currentTP3 : na, "TP3", color.aqua, 1, plot.style_cross)
+
+// Сигнали
+plotshape(strongLong and strategy.position_size == 0 and inBacktestPeriod, "Strong LONG", shape.labelup, location.belowbar, color.lime, size=size.normal, text="🚀")
+plotshape(strongShort and strategy.position_size == 0 and inBacktestPeriod, "Strong SHORT", shape.labeldown, location.abovebar, color.red, size=size.normal, text="📉")
+plotshape(normalLong and not strongLong and strategy.position_size == 0 and inBacktestPeriod, "LONG", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(normalShort and not strongShort and strategy.position_size == 0 and inBacktestPeriod, "SHORT", shape.triangledown, location.abovebar, color.maroon, size=size.small)
+
+// Background
+bgColor = not inBacktestPeriod ? color.new(color.gray, 95) : strategy.position_size > 0 ? color.new(color.green, 93) : strategy.position_size < 0 ? color.new(color.red, 93) : na
+bgcolor(bgColor)
+
+barcolor(colorBars ? (strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : na) : na)
+
+// ═══════════════════════════════════════════════════════════════
+// ИНФОРМАЦИОННИ ТАБЛИЦИ
+// ═══════════════════════════════════════════════════════════════
+
+// BACKTEST RESULTS TABLE
+var table resultsTable = table.new(position.top_right, 2, 16, bgcolor=color.new(color.black, 85), border_width=1, border_color=color.gray)
+
+if showTable
+    // Header
+    table.cell(resultsTable, 0, 0, "📊 BACKTEST", text_color=color.yellow, text_size=size.normal, bgcolor=color.new(color.blue, 60))
+    table.cell(resultsTable, 1, 0, "", bgcolor=color.new(color.blue, 60))
+    
+    // Capital
+    table.cell(resultsTable, 0, 1, "Initial", text_color=color.gray, text_size=size.tiny)
+    table.cell(resultsTable, 1, 1, str.tostring(strategy.initial_capital, "#.##") + " USD", text_color=color.white, text_size=size.tiny)
+    
+    table.cell(resultsTable, 0, 2, "Equity", text_color=color.gray, text_size=size.tiny)
+    eqColor = strategy.equity > strategy.initial_capital ? color.lime : color.red
+    table.cell(resultsTable, 1, 2, str.tostring(strategy.equity, "#.##") + " USD", text_color=eqColor, text_size=size.tiny)
+    
+    table.cell(resultsTable, 0, 3, "Net Profit", text_color=color.gray, text_size=size.tiny)
+    npColor = strategy.netprofit > 0 ? color.lime : color.red
+    table.cell(resultsTable, 1, 3, str.tostring(netProfitPct, "#.##") + "%", text_color=npColor, text_size=size.tiny)
+    
+    // Drawdown
+    table.cell(resultsTable, 0, 4, "Max DD", text_color=color.gray, text_size=size.tiny)
+    ddColor = maxDrawdownPct > 30 ? color.red : maxDrawdownPct > 15 ? color.orange : color.yellow
+    table.cell(resultsTable, 1, 4, str.tostring(maxDrawdownPct, "#.##") + "%", text_color=ddColor, text_size=size.tiny)
+    
+    // Trades
+    table.cell(resultsTable, 0, 5, "Trades", text_color=color.gray, text_size=size.tiny)
+    table.cell(resultsTable, 1, 5, str.tostring(strategy.closedtrades), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(resultsTable, 0, 6, "Win/Loss", text_color=color.gray, text_size=size.tiny)
+    table.cell(resultsTable, 1, 6, str.tostring(strategy.wintrades) + "/" + str.tostring(strategy.losstrades), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(resultsTable, 0, 7, "Win Rate", text_color=color.gray, text_size=size.tiny)
+    wrColor = winRate > 50 ? color.lime : winRate > 40 ? color.yellow : color.red
+    table.cell(resultsTable, 1, 7, str.tostring(winRate, "#.#") + "%", text_color=wrColor, text_size=size.tiny)
+    
+    table.cell(resultsTable, 0, 8, "Profit Factor", text_color=color.gray, text_size=size.tiny)
+    pfColor = profitFactor > 1.5 ? color.lime : profitFactor > 1.0 ? color.yellow : color.red
+    table.cell(resultsTable, 1, 8, str.tostring(profitFactor, "#.##"), text_color=pfColor, text_size=size.tiny)
+    
+    // Current Position
+    table.cell(resultsTable, 0, 9, "Position", text_color=color.gray, text_size=size.tiny)
+    posText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posColor = strategy.position_size > 0 ? color.lime : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(resultsTable, 1, 9, posText, text_color=posColor, text_size=size.tiny)
+    
+    // Open P/L
+    table.cell(resultsTable, 0, 10, "Open P/L", text_color=color.gray, text_size=size.tiny)
+    openPnL = strategy.position_size != 0 ? strategy.openprofit : 0
+    openPnLColor = openPnL > 0 ? color.lime : openPnL < 0 ? color.red : color.gray
+    table.cell(resultsTable, 1, 10, str.tostring(openPnL, "#.##") + " USD", text_color=openPnLColor, text_size=size.tiny)
+    
+    // Scores
+    table.cell(resultsTable, 0, 11, "Bull Score", text_color=color.gray, text_size=size.tiny)
+    table.cell(resultsTable, 1, 11, str.tostring(finalBull, "#.#") + " C:" + str.tostring(bullConf), text_color=finalBull >= minScore ? color.lime : color.white, text_size=size.tiny)
+    
+    table.cell(resultsTable, 0, 12, "Bear Score", text_color=color.gray, text_size=size.tiny)
+    table.cell(resultsTable, 1, 12, str.tostring(finalBear, "#.#") + " C:" + str.tostring(bearConf), text_color=finalBear >= minScore ? color.red : color.white, text_size=size.tiny)
+    
+    // Trend
+    table.cell(resultsTable, 0, 13, "Trend", text_color=color.gray, text_size=size.tiny)
+    trendText = bullTrend ? "BULL" : bearTrend ? "BEAR" : "NEUT"
+    trendColor = bullTrend ? color.lime : bearTrend ? color.red : color.yellow
+    table.cell(resultsTable, 1, 13, trendText, text_color=trendColor, text_size=size.tiny)
+    
+    // Signal
+    signalText = strongLong ? "🚀 LONG!" : strongShort ? "📉 SHORT!" : normalLong ? "Long" : normalShort ? "Short" : "Wait"
+    signalBg = (strongLong or normalLong) ? color.new(color.green, 40) : (strongShort or normalShort) ? color.new(color.red, 40) : color.new(color.gray, 70)
+    table.cell(resultsTable, 0, 14, "SIGNAL", text_color=color.white, text_size=size.small, bgcolor=signalBg)
+    table.cell(resultsTable, 1, 14, signalText, text_color=color.white, text_size=size.small, bgcolor=signalBg)
+
+// ═══════════════════════════════════════════════════════════════
+// DATA WINDOW
+// ═══════════════════════════════════════════════════════════════
+plot(finalBull, "Bull Score", display=display.data_window)
+plot(finalBear, "Bear Score", display=display.data_window)
+plot(bullConf, "Bull Confluence", display=display.data_window)
+plot(bearConf, "Bear Confluence", display=display.data_window)
+plot(strategy.equity, "Equity", display=display.data_window)
+plot(netProfitPct, "Net Profit %", display=display.data_window)
+plot(maxDrawdownPct, "Max Drawdown %", display=display.data_window)
+plot(winRate, "Win Rate %", display=display.data_window)

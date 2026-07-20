@@ -1,0 +1,137 @@
+//@version=6
+strategy(title="Supertrend + Multi-Filter Strategy with Buy/Sell Pressure + New Rules", 
+     overlay=true, 
+     default_qty_type=strategy.percent_of_equity, 
+     default_qty_value=15)
+
+//=============================================================================
+// 1) Time Window Filters
+//=============================================================================
+useTimeFilter = input.bool(true, title="Enable Time Filter?")
+FromMonth     = input.int(4,  title='From Month', minval=1, maxval=12)
+FromDay       = input.int(17, title='From Day',   minval=1, maxval=31)
+FromYear      = input.int(2024, title='From Year', minval=2024)
+ToMonth       = input.int(12,  title='To Month',  minval=1, maxval=12)
+ToDay         = input.int(31,  title='To Day',    minval=1, maxval=31)
+ToYear        = input.int(9999, title='To Year',  minval=2024)
+
+start  = timestamp(FromYear, FromMonth, FromDay, 0, 0)
+finish = timestamp(ToYear,   ToMonth,   ToDay,   23, 59)
+timeFilterPass = not useTimeFilter or (time >= start and time <= finish)
+
+//=============================================================================
+// 2) Supertrend Filter
+//=============================================================================
+useSupertrend = input.bool(true, title="Enable Supertrend Filter?")
+atrPeriod     = input.int(7, title='ATR Length')
+factor        = input.float(0.5, title='Supertrend Factor', step=0.01)
+[_, direction] = ta.supertrend(factor, atrPeriod)
+
+supertrendLong  = ta.change(direction) < 0
+supertrendShort = ta.change(direction) > 0
+
+//=============================================================================
+// 3) EMA Filters
+//=============================================================================
+useEMAFilter = input.bool(true, title="Enable EMA Filter?")
+emaLengthFast = input.int(9, title="Fast EMA Length")
+emaLengthSlow = input.int(21, title="Slow EMA Length")
+
+emaFast = ta.ema(close, emaLengthFast)
+emaSlow = ta.ema(close, emaLengthSlow)
+
+emaPassLong  = not useEMAFilter or (close > emaFast and close > emaSlow)
+emaPassShort = not useEMAFilter or (close < emaFast and close < emaSlow)
+
+//=============================================================================
+// 4) Volume Filters
+//=============================================================================
+useVolumeFilter = input.bool(true, title="Enable Volume Filter?")
+volumeLookback  = input.int(50, title="Volume Lookback")
+avgVolume       = ta.sma(volume, volumeLookback)
+volumePass      = not useVolumeFilter or (volume > avgVolume)
+
+//=============================================================================
+// 5) RSI Filter
+//=============================================================================
+useRSIFilter  = input.bool(false, title="Enable RSI Filter?")
+rsiLength     = input.int(14, title="RSI Length")
+rsiOverbought = input.int(70, title="RSI Overbought Level")
+rsiOversold   = input.int(30, title="RSI Oversold Level")
+rsiValue      = ta.rsi(close, rsiLength)
+
+rsiPassLong  = not useRSIFilter or (rsiValue < rsiOversold)
+rsiPassShort = not useRSIFilter or (rsiValue > rsiOverbought)
+
+//=============================================================================
+// 6) Buy/Sell Pressure Ratio (BSPR)
+//=============================================================================
+useBSPFilter = input.bool(true, title="Enable Buy/Sell Pressure Filter?")
+bsLongThreshold  = input.float(0.65, title="BSPR Threshold (Longs)", minval=0.5, maxval=1.0)
+bsShortThreshold = input.float(0.35, title="BSPR Threshold (Shorts)", minval=0.0, maxval=0.5)
+
+buyPressure  = close > open ? volume : volume * 0.5
+sellPressure = close < open ? volume : volume * 0.5
+bsRatio = buyPressure / (buyPressure + sellPressure)
+
+filterExitLong  = not useBSPFilter or bsRatio < bsLongThreshold
+filterExitShort = not useBSPFilter or bsRatio > bsShortThreshold
+
+//=============================================================================
+// 7) Combine All Filters
+//=============================================================================
+finalLongCondition  = supertrendLong and emaPassLong and volumePass and rsiPassLong and timeFilterPass
+finalShortCondition = supertrendShort and emaPassShort and volumePass and rsiPassShort and timeFilterPass
+
+//=============================================================================
+// 8) New Rule 1: Hold Position Until Opposite Signal (Switchable)
+//=============================================================================
+holdUntilOpposite = input.bool(true, title="Hold Position Until Opposite Signal?")
+
+//=============================================================================
+// 9) New Rule 2: Only Enter Trades Matching Shield (Switchable)
+//=============================================================================
+tradeMatchingShield = input.bool(false, title="Only Trade When Matching Shield Appears?")
+
+//=============================================================================
+// 10) Stop-Loss & Trailing Stop-Loss
+//=============================================================================
+fixedStopLoss = input.float(2.0, title="Fixed Stop-Loss (%)", minval=0.1, maxval=50.0)
+trailingStop  = input.float(1.5, title="Trailing Stop (%)", step=0.1)
+
+longStopLoss  = close * (1 - fixedStopLoss / 100)
+shortStopLoss = close * (1 + fixedStopLoss / 100)
+
+//=============================================================================
+// ► Trade Execution with Alerts for Bitget (Market Orders)
+//=============================================================================
+
+// Track Open Positions
+var bool inLong = false
+var bool inShort = false
+
+if finalLongCondition
+    if inShort
+        if not holdUntilOpposite or filterExitLong
+            strategy.close("Short Entry", comment="Close Short on Long Signal")
+            alert('{ "id": "close_short_' + str.tostring(time) + '", "symbol": "SOLUSDT", "marginCoin": "USDT", "side": "buy", "posSide": "short", "size": 1, "orderType": "market", "reduceOnly": true }', alert.freq_once_per_bar)
+            inShort := false  
+
+    if not inLong and (not tradeMatchingShield or inShort)
+        strategy.entry("Long Entry", strategy.long)
+        strategy.exit("Close Long", "Long Entry", stop=longStopLoss, trail_points=trailingStop / 100 * close, trail_offset=trailingStop / 100 * close)
+        alert('{ "id": "open_long_' + str.tostring(time) + '", "symbol": "SOLUSDT", "marginCoin": "USDT", "side": "buy", "posSide": "long", "size": 1, "orderType": "market", "reduceOnly": false }', alert.freq_once_per_bar)
+        inLong := true
+
+if finalShortCondition
+    if inLong
+        if not holdUntilOpposite or filterExitShort
+            strategy.close("Long Entry", comment="Close Long on Short Signal")
+            alert('{ "id": "close_long_' + str.tostring(time) + '", "symbol": "SOLUSDT", "marginCoin": "USDT", "side": "sell", "posSide": "long", "size": 1, "orderType": "market", "reduceOnly": true }', alert.freq_once_per_bar)
+            inLong := false  
+
+    if not inShort and (not tradeMatchingShield or inLong)
+        strategy.entry("Short Entry", strategy.short)
+        strategy.exit("Close Short", "Short Entry", stop=shortStopLoss, trail_points=trailingStop / 100 * close, trail_offset=trailingStop / 100 * close)
+        alert('{ "id": "open_short_' + str.tostring(time) + '", "symbol": "SOLUSDT", "marginCoin": "USDT", "side": "sell", "posSide": "short", "size": 1, "orderType": "market", "reduceOnly": false }', alert.freq_once_per_bar)
+        inShort := true

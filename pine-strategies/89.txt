@@ -1,0 +1,210 @@
+//@version=5
+indicator("Candle Patterns + Volume Analysis", overlay=true, max_labels_count=500)
+
+// ═══════════════════════════════════════════════════════════════
+// НАСТРОЙКИ
+// ═══════════════════════════════════════════════════════════════
+grp1 = "📊 Настройки на свещите"
+bodyMultiplier = input.float(1.5, "Голяма свещ (x от средното)", minval=1.0, group=grp1)
+dojiThreshold = input.float(0.1, "Doji праг (тяло/обхват)", minval=0.01, maxval=0.3, group=grp1)
+lookback = input.int(20, "Период за средни стойности", minval=5, group=grp1)
+
+grp2 = "📈 Настройки на обема"
+volMultiplier = input.float(1.5, "Висок обем (x от средното)", minval=1.0, group=grp2)
+volLowMultiplier = input.float(0.5, "Нисък обем (x от средното)", maxval=1.0, group=grp2)
+
+grp3 = "🎨 Визуализация"
+showLabels = input.bool(true, "Покажи етикети", group=grp3)
+showBackground = input.bool(true, "Покажи фон", group=grp3)
+
+// ═══════════════════════════════════════════════════════════════
+// ИЗЧИСЛЕНИЯ НА СВЕЩИТЕ
+// ═══════════════════════════════════════════════════════════════
+
+// Основни измервания на свещта
+bodySize = math.abs(close - open)
+upperWick = high - math.max(close, open)
+lowerWick = math.min(close, open) - low
+totalRange = high - low
+midPoint = (high + low) / 2
+
+// Средни стойности
+avgBody = ta.sma(bodySize, lookback)
+avgRange = ta.sma(totalRange, lookback)
+avgVolume = ta.sma(volume, lookback)
+
+// Съотношения
+bodyToRange = totalRange > 0 ? bodySize / totalRange : 0
+upperWickRatio = totalRange > 0 ? upperWick / totalRange : 0
+lowerWickRatio = totalRange > 0 ? lowerWick / totalRange : 0
+
+// Класификация на свещата
+isBullish = close > open
+isBearish = close < open
+isLargeBody = bodySize > avgBody * bodyMultiplier
+isSmallBody = bodySize < avgBody * 0.5
+isDoji = bodyToRange < dojiThreshold
+
+// Класификация на обема
+isHighVolume = volume > avgVolume * volMultiplier
+isLowVolume = volume < avgVolume * volLowMultiplier
+volumeRatio = volume / avgVolume
+
+// ═══════════════════════════════════════════════════════════════
+// РАЗПОЗНАВАНЕ НА МОДЕЛИ
+// ═══════════════════════════════════════════════════════════════
+
+// === DOJI ВАРИАЦИИ ===
+isDojiFly = isDoji and lowerWickRatio > 0.6 // Dragonfly Doji
+isDojiGrave = isDoji and upperWickRatio > 0.6 // Gravestone Doji
+isDojiStar = isDoji and upperWickRatio > 0.3 and lowerWickRatio > 0.3 // Star Doji
+
+// === HAMMER / HANGING MAN ===
+isHammer = lowerWickRatio > 0.6 and upperWickRatio < 0.1 and bodyToRange < 0.3
+isInvertedHammer = upperWickRatio > 0.6 and lowerWickRatio < 0.1 and bodyToRange < 0.3
+
+// === MARUBOZU (силни свещи без сенки) ===
+isMarubozuBull = isBullish and bodyToRange > 0.9 and isLargeBody
+isMarubozuBear = isBearish and bodyToRange > 0.9 and isLargeBody
+
+// === ENGULFING ===
+prevBodySize = math.abs(close[1] - open[1])
+isBullEngulfing = isBullish and isBearish[1] and bodySize > prevBodySize and open <= close[1] and close >= open[1]
+isBearEngulfing = isBearish and isBullish[1] and bodySize > prevBodySize and open >= close[1] and close <= open[1]
+
+// === SPINNING TOP ===
+isSpinningTop = bodyToRange < 0.3 and bodyToRange > dojiThreshold and upperWickRatio > 0.2 and lowerWickRatio > 0.2
+
+// === PIN BAR ===
+isPinBarBull = lowerWickRatio > 0.65 and bodyToRange < 0.25 and upperWickRatio < 0.1
+isPinBarBear = upperWickRatio > 0.65 and bodyToRange < 0.25 and lowerWickRatio < 0.1
+
+// ═══════════════════════════════════════════════════════════════
+// СИГНАЛИ С ПОТВЪРЖДЕНИЕ ОТ ОБЕМА
+// ═══════════════════════════════════════════════════════════════
+
+// Силни бичи сигнали (модел + висок обем)
+strongBullSignal = (isBullEngulfing or isMarubozuBull or isPinBarBull or isDojiFly) and isHighVolume
+weakBullSignal = (isHammer or isDojiFly) and not isLowVolume
+
+// Силни мечи сигнали (модел + висок обем)
+strongBearSignal = (isBearEngulfing or isMarubozuBear or isPinBarBear or isDojiGrave) and isHighVolume
+weakBearSignal = (isInvertedHammer or isDojiGrave) and not isLowVolume
+
+// Неопределеност (doji/spinning top + нисък обем)
+indecisionSignal = (isDoji or isSpinningTop) and isLowVolume
+
+// ═══════════════════════════════════════════════════════════════
+// СКОРИНГ СИСТЕМА
+// ═══════════════════════════════════════════════════════════════
+
+var float bullScore = 0
+var float bearScore = 0
+
+// Изчисляване на точки
+bullPoints = 0.0
+bearPoints = 0.0
+
+// Точки за модел
+bullPoints := bullPoints + (isBullEngulfing ? 3 : 0)
+bullPoints := bullPoints + (isMarubozuBull ? 3 : 0)
+bullPoints := bullPoints + (isPinBarBull ? 2 : 0)
+bullPoints := bullPoints + (isHammer ? 2 : 0)
+bullPoints := bullPoints + (isDojiFly ? 1 : 0)
+
+bearPoints := bearPoints + (isBearEngulfing ? 3 : 0)
+bearPoints := bearPoints + (isMarubozuBear ? 3 : 0)
+bearPoints := bearPoints + (isPinBarBear ? 2 : 0)
+bearPoints := bearPoints + (isInvertedHammer ? 2 : 0)
+bearPoints := bearPoints + (isDojiGrave ? 1 : 0)
+
+// Умножение за обем
+volumeMultiplier = isHighVolume ? 2.0 : (isLowVolume ? 0.5 : 1.0)
+bullPoints := bullPoints * volumeMultiplier
+bearPoints := bearPoints * volumeMultiplier
+
+// ═══════════════════════════════════════════════════════════════
+// ВИЗУАЛИЗАЦИЯ
+// ═══════════════════════════════════════════════════════════════
+
+// Цветове
+colorStrongBull = color.new(color.lime, 0)
+colorWeakBull = color.new(color.green, 50)
+colorStrongBear = color.new(color.red, 0)
+colorWeakBear = color.new(color.maroon, 50)
+colorIndecision = color.new(color.yellow, 50)
+
+// Фон
+bgColor = strongBullSignal ? color.new(color.green, 85) :
+          strongBearSignal ? color.new(color.red, 85) :
+          indecisionSignal ? color.new(color.yellow, 90) : na
+
+bgcolor(showBackground ? bgColor : na)
+
+// Етикети за силни сигнали
+if showLabels and strongBullSignal
+    label.new(bar_index, low, "🐂\nVol:" + str.tostring(volumeRatio, "#.#") + "x", 
+              style=label.style_label_up, color=colorStrongBull, textcolor=color.black, size=size.small)
+
+if showLabels and strongBearSignal
+    label.new(bar_index, high, "🐻\nVol:" + str.tostring(volumeRatio, "#.#") + "x", 
+              style=label.style_label_down, color=colorStrongBear, textcolor=color.white, size=size.small)
+
+// Триъгълници за слаби сигнали
+plotshape(weakBullSignal and not strongBullSignal, "Weak Bull", shape.triangleup, 
+          location.belowbar, colorWeakBull, size=size.tiny)
+plotshape(weakBearSignal and not strongBearSignal, "Weak Bear", shape.triangledown, 
+          location.abovebar, colorWeakBear, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════
+// ИНФОРМАЦИОННА ТАБЛИЦА
+// ═══════════════════════════════════════════════════════════════
+
+var table infoTable = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 80))
+
+if barstate.islast
+    // Заглавие
+    table.cell(infoTable, 0, 0, "📊 Анализ", text_color=color.white, text_size=size.normal)
+    table.cell(infoTable, 1, 0, "Стойност", text_color=color.white, text_size=size.normal)
+    
+    // Данни за свещта
+    table.cell(infoTable, 0, 1, "Тяло/Обхват", text_color=color.gray)
+    table.cell(infoTable, 1, 1, str.tostring(bodyToRange * 100, "#.#") + "%", 
+               text_color=bodyToRange > 0.7 ? color.lime : color.white)
+    
+    table.cell(infoTable, 0, 2, "Горна сянка", text_color=color.gray)
+    table.cell(infoTable, 1, 2, str.tostring(upperWickRatio * 100, "#.#") + "%", text_color=color.white)
+    
+    table.cell(infoTable, 0, 3, "Долна сянка", text_color=color.gray)
+    table.cell(infoTable, 1, 3, str.tostring(lowerWickRatio * 100, "#.#") + "%", text_color=color.white)
+    
+    table.cell(infoTable, 0, 4, "Тяло vs Средно", text_color=color.gray)
+    table.cell(infoTable, 1, 4, str.tostring(bodySize/avgBody, "#.##") + "x", 
+               text_color=isLargeBody ? color.lime : color.white)
+    
+    // Данни за обема
+    table.cell(infoTable, 0, 5, "📈 Обем", text_color=color.yellow)
+    table.cell(infoTable, 1, 5, str.tostring(volumeRatio, "#.##") + "x", 
+               text_color=isHighVolume ? color.lime : (isLowVolume ? color.red : color.white))
+    
+    // Разпознат модел
+    patternName = isDoji ? "Doji" : 
+                  isHammer ? "Hammer" : 
+                  isBullEngulfing ? "Bull Engulf" :
+                  isBearEngulfing ? "Bear Engulf" :
+                  isMarubozuBull ? "Marubozu ↑" :
+                  isMarubozuBear ? "Marubozu ↓" :
+                  isPinBarBull ? "Pin Bar ↑" :
+                  isPinBarBear ? "Pin Bar ↓" :
+                  isSpinningTop ? "Spinning" : "—"
+    
+    table.cell(infoTable, 0, 6, "🕯️ Модел", text_color=color.yellow)
+    table.cell(infoTable, 1, 6, patternName, text_color=color.white)
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+
+alertcondition(strongBullSignal, "Силен БИЧ сигнал", "Силен бичи модел с висок обем!")
+alertcondition(strongBearSignal, "Силен МЕЧИ сигнал", "Силен мечи модел с висок обем!")
+alertcondition(indecisionSignal, "Неопределеност", "Doji/Spinning top с нисък обем")

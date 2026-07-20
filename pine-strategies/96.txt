@@ -1,0 +1,18 @@
+//@version=5
+indicator("Avoid Choppy Market Indicator", overlay=true)
+
+// Input parameters
+length = input.int(20, minval=1, title="Volatility Calculation Length")
+threshold = input.float(0.5, step=0.01, title="Volatility Threshold")
+
+// Calculate the average true range (ATR) to measure volatility
+atr_value = ta.atr(length)
+
+// Determine if the market is choppy (sideways)
+isChoppy = atr_value < threshold
+
+// Plotting
+plotshape(series=isChoppy, title="Choppy Market", location=location.belowbar, color=color.red, style=shape.labeldown, text="Choppy")
+
+// Output signals (for demonstration purposes)
+plotshape(series=not isChoppy, title="Not Choppy Market", location=location.abovebar, color=color.green, style=shape.labelup, text="Not Choppy")

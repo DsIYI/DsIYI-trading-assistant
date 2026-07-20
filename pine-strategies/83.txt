@@ -1,0 +1,111 @@
+//@version=6
+strategy("Bitget BB Breakout Strategy [Upgraded]", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === INPUTS ===
+length = input.int(20, title="BB Length")
+src = input(close, title="BB Source")
+mult = input.float(2.0, title="BB Multiplier")
+useHeikinAshi = input.bool(true, title="Use Heikin Ashi Calculation")
+
+// === BACKTEST DATE RANGE ===
+fromYear = input.int(2024, "From Year")
+fromMonth = input.int(1, "From Month")
+fromDay = input.int(1, "From Day")
+toYear = input.int(2025, "To Year")
+toMonth = input.int(12, "To Month")
+toDay = input.int(31, "To Day")
+
+startDate = timestamp(fromYear, fromMonth, fromDay, 0, 0)
+endDate = timestamp(toYear, toMonth, toDay, 23, 59)
+isInDateRange = (time >= startDate and time <= endDate)
+
+// === DELAY FILTERS ===
+delay_group = "Delay Filters"
+delay_htf = input.timeframe("10s", title="Delay Calculation Timeframe", group=delay_group)
+delay_type = input.string("Bars", title="Delay Type", options=["Bars", "Seconds"], group=delay_group)
+delay_bars = input.int(5, title="Min Bars Between Same-Direction Trades", minval=0, group=delay_group)
+delay_seconds = input.int(50, title="Min Seconds Between Same-Direction Trades", minval=1, group=delay_group)
+loss_delay_bars = input.int(5, title="Bars to Wait After Loss", minval=0, group=delay_group)
+loss_delay_seconds = input.int(50, title="Seconds to Wait After Loss", minval=1, group=delay_group)
+
+// === HEIKIN ASHI PRICE CALCULATION ===
+ha_open = 0.0
+ha_close = 0.0
+ha_high = 0.0
+ha_low = 0.0
+
+ha_close_raw = request.security(syminfo.tickerid, timeframe.period, (open + high + low + close) / 4)
+ha_open_prev = request.security(syminfo.tickerid, timeframe.period, na)
+ha_open := na(ha_open[1]) ? (open + close) / 2 : (ha_open[1] + ha_close[1]) / 2
+ha_high := request.security(syminfo.tickerid, timeframe.period, math.max(high, math.max(ha_open, ha_close)))
+ha_low := request.security(syminfo.tickerid, timeframe.period, math.min(low, math.min(ha_open, ha_close)))
+ha_close := ha_close_raw
+
+my_hlc3 = useHeikinAshi ? (ha_high + ha_low + ha_close) / 3 : hlc3
+
+// === BB CALCULATION ===
+basis = ta.sma(src, length)
+deviation = mult * ta.stdev(src, length)
+upperBB = basis + deviation
+lowerBB = basis - deviation
+
+longCondition = close > upperBB
+shortCondition = close < lowerBB
+
+// === DELAY LOGIC ===
+htf_index = request.security(syminfo.tickerid, delay_htf, bar_index, lookahead=barmerge.lookahead_on)
+
+get_delay_bars(seconds) =>
+    seconds_per_bar = switch delay_htf
+        "5s" => 5
+        "10s" => 10
+        "15s" => 15
+        "30s" => 30
+        "1m" => 60
+        => 60
+    math.ceil(seconds / seconds_per_bar)
+
+delay_val = delay_type == "Bars" ? delay_bars : get_delay_bars(delay_seconds)
+loss_delay_val = delay_type == "Bars" ? loss_delay_bars : get_delay_bars(loss_delay_seconds)
+
+var int last_long_trade = na
+var int last_short_trade = na
+var int last_loss_long = na
+var int last_loss_short = na
+var int prev_trade_dir = na
+
+can_long_delay = na(last_long_trade) or (htf_index - last_long_trade) >= delay_val
+can_short_delay = na(last_short_trade) or (htf_index - last_short_trade) >= delay_val
+can_long_loss = na(last_loss_long) or (htf_index - last_loss_long) >= loss_delay_val
+can_short_loss = na(last_loss_short) or (htf_index - last_loss_short) >= loss_delay_val
+
+can_long = can_long_delay and can_long_loss
+can_short = can_short_delay and can_short_loss
+
+// === ENTRY LOGIC ===
+if (longCondition and can_long and isInDateRange)
+    strategy.entry("Buy Long", strategy.long)
+    last_long_trade := htf_index
+    prev_trade_dir := 1
+
+if (shortCondition and can_short and isInDateRange)
+    strategy.entry("Sell Short", strategy.short)
+    last_short_trade := htf_index
+    prev_trade_dir := -1
+
+// === TRACK LOSSES ===
+var float prev_trade_profit = na
+if (strategy.closedtrades > 0)
+    last_idx = strategy.closedtrades - 1
+    this_trade_profit = strategy.closedtrades.profit(last_idx)
+
+    if (na(prev_trade_profit) or prev_trade_profit != this_trade_profit)
+        if (this_trade_profit < 0)
+            if (prev_trade_dir == 1)
+                last_loss_long := htf_index
+            else if (prev_trade_dir == -1)
+                last_loss_short := htf_index
+        prev_trade_profit := this_trade_profit
+
+// === BACKGROUND COLOR ===
+bgcolor(longCondition ? color.new(color.green, 85) : shortCondition ? color.new(color.red, 85) : na)

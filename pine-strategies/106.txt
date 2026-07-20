@@ -1,0 +1,535 @@
+//@version=6
+strategy("CPR Crypto Strategy v2.2 [No Repaint]", shorttitle = "CPR v2.2 NR", overlay = true, initial_capital = 1000, default_qty_type = strategy.percent_of_equity, default_qty_value = 10, commission_type = strategy.commission.percent, commission_value = 0.06, slippage = 2, pyramiding = 0, calc_on_every_tick = false, process_orders_on_close = true, max_labels_count = 500, max_lines_count = 500)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// █████████████████████████ INPUTS █████████████████████████████████████████████
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ——— Timing Settings ———
+string GRP_TIME = "═══ Backtest Period ═══"
+FromMonth = input.int(defval=1, title='From Month', minval=1, maxval=12, group=GRP_TIME)
+FromDay = input.int(defval=1, title='From Day', minval=1, maxval=31, group=GRP_TIME)
+FromYear = input.int(defval=2024, title='From Year', minval=2020, group=GRP_TIME)
+ToMonth = input.int(defval=12, title='To Month', minval=1, maxval=12, group=GRP_TIME)
+ToDay = input.int(defval=31, title='To Day', minval=1, maxval=31, group=GRP_TIME)
+ToYear = input.int(defval=9999, title='To Year', minval=2024, group=GRP_TIME)
+
+start = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+
+inDateRange = time >= start and time <= finish
+
+// ——— Strategy Settings ———
+string GRP_STRAT = "═══ Strategy Settings ═══"
+i_direction = input.string("Both", "Trade Direction", options=["Long Only", "Short Only", "Both"], group=GRP_STRAT)
+i_tradingHours = input.bool(false, "Use Trading Hours Filter", group=GRP_STRAT)
+i_sessionTime = input.session("0000-2359", "Trading Session", group=GRP_STRAT)
+
+// ——— CPR Settings ———
+string GRP_CPR = "═══ CPR Settings ═══"
+i_cprTimeframe = input.string("D", "CPR Timeframe", options=["D", "W", "M"], group=GRP_CPR, tooltip="D = Daily CPR, W = Weekly CPR, M = Monthly CPR")
+i_cprType = input.string("Traditional", "CPR Type", options=["Traditional", "Fibonacci", "Camarilla"], group=GRP_CPR)
+i_showCPR = input.bool(true, "Show CPR Levels", group=GRP_CPR)
+i_showSR = input.bool(true, "Show S/R Levels", group=GRP_CPR)
+i_cprColor = input.color(color.blue, "CPR Color", group=GRP_CPR)
+i_resistanceColor = input.color(color.new(#26a69a, 0), "Resistance Color", group=GRP_CPR)
+i_supportColor = input.color(color.new(#ef5350, 0), "Support Color", group=GRP_CPR)
+
+// ——— Trend Filter (Moving Averages) ———
+string GRP_MA = "═══ Trend Filter (MA) ═══"
+i_useTrendFilter = input.bool(true, "Use Trend Filter", group=GRP_MA, tooltip="When ON: Long only in uptrend, Short only in downtrend")
+i_trendMode = input.string("Price > Trend MA", "Trend Detection Mode", options=["Price > Trend MA", "Fast MA > Slow MA", "Both Conditions"], group=GRP_MA, tooltip="How to determine the trend direction")
+i_maFastType = input.string("EMA", "Fast MA Type", options=["SMA", "EMA", "WMA", "RMA"], group=GRP_MA)
+i_maFastLen = input.int(9, "Fast MA Length", minval=1, group=GRP_MA)
+i_maSlowType = input.string("EMA", "Slow MA Type", options=["SMA", "EMA", "WMA", "RMA"], group=GRP_MA)
+i_maSlowLen = input.int(21, "Slow MA Length", minval=1, group=GRP_MA)
+i_maTrendType = input.string("EMA", "Trend MA Type", options=["SMA", "EMA", "WMA", "RMA"], group=GRP_MA)
+i_maTrendLen = input.int(50, "Trend MA Length", minval=1, group=GRP_MA)
+i_showMAs = input.bool(true, "Show Moving Averages", group=GRP_MA)
+
+// ——— Entry Settings ———
+string GRP_ENTRY = "═══ Entry Settings ═══"
+i_entryMode = input.string("CPR Breakout", "Entry Mode", options=["CPR Breakout", "CPR Bounce", "CPR + MA Cross", "Full Confluence"], group=GRP_ENTRY)
+i_confirmBars = input.int(1, "Confirmation Bars", minval=1, maxval=5, group=GRP_ENTRY, tooltip="Number of bars price must stay above/below level")
+
+// ——— Exit Settings ———
+string GRP_EXIT = "═══ Exit / Risk Management ═══"
+i_exitMode = input.string("ATR Based", "Exit Mode", options=["ATR Based", "Fixed Percent", "CPR Levels", "Trailing Stop"], group=GRP_EXIT)
+i_atrLength = input.int(14, "ATR Length", minval=1, group=GRP_EXIT)
+i_atrMultSL = input.float(1.5, "ATR Multiplier (Stop Loss)", minval=0.5, step=0.1, group=GRP_EXIT)
+i_atrMultTP = input.float(3.0, "ATR Multiplier (Take Profit)", minval=0.5, step=0.1, group=GRP_EXIT)
+i_fixedSLPercent = input.float(1.5, "Fixed Stop Loss (%)", minval=0.1, step=0.1, group=GRP_EXIT)
+i_fixedTPPercent = input.float(3.0, "Fixed Take Profit (%)", minval=0.1, step=0.1, group=GRP_EXIT)
+i_trailPercent = input.float(1.0, "Trailing Stop (%)", minval=0.1, step=0.1, group=GRP_EXIT)
+i_trailActivation = input.float(1.0, "Trailing Activation (%)", minval=0.1, step=0.1, group=GRP_EXIT)
+
+// ——— Filters ———
+string GRP_FILTER = "═══ Additional Filters ═══"
+i_useVolumeFilter = input.bool(false, "Use Volume Filter", group=GRP_FILTER)
+i_volMaLen = input.int(20, "Volume MA Length", minval=1, group=GRP_FILTER)
+i_volMultiplier = input.float(1.2, "Min Volume Multiplier", minval=0.5, step=0.1, group=GRP_FILTER)
+i_useRSIFilter = input.bool(false, "Use RSI Filter", group=GRP_FILTER)
+i_rsiLength = input.int(14, "RSI Length", minval=1, group=GRP_FILTER)
+i_rsiOverbought = input.int(70, "RSI Overbought", minval=50, maxval=100, group=GRP_FILTER)
+i_rsiOversold = input.int(30, "RSI Oversold", minval=0, maxval=50, group=GRP_FILTER)
+
+// ——— Webhook Settings ———
+string GRP_WEBHOOK = "═══ Webhook / Alerts ═══"
+i_useWebhook = input.bool(true, "Enable Webhook Alerts", group=GRP_WEBHOOK)
+i_symbol = input.string("BTCUSDT", "Symbol for Webhook", group=GRP_WEBHOOK)
+i_leverage = input.int(10, "Leverage", minval=1, maxval=125, group=GRP_WEBHOOK)
+i_marginMode = input.string("isolated", "Margin Mode", options=["isolated", "cross"], group=GRP_WEBHOOK)
+
+// ——— Display Settings ———
+string GRP_DISPLAY = "═══ Display Settings ═══"
+i_showLabels = input.bool(true, "Show Entry/Exit Labels", group=GRP_DISPLAY)
+i_showTable = input.bool(true, "Show Info Table", group=GRP_DISPLAY)
+i_tablePosition = input.string("top_right", "Table Position", options=["top_left", "top_center", "top_right", "middle_left", "middle_center", "middle_right", "bottom_left", "bottom_center", "bottom_right"], group=GRP_DISPLAY)
+i_tableSize = input.string("small", "Table Size", options=["tiny", "small", "normal", "large"], group=GRP_DISPLAY)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ████████████████████████ FUNCTIONS ███████████████████████████████████████████
+// ══════════════════════════════════════════════════════════════════════════════
+
+f_ma(src, len, type) =>
+    result = ta.ema(src, len)
+    if type == "SMA"
+        result := ta.sma(src, len)
+    else if type == "EMA"
+        result := ta.ema(src, len)
+    else if type == "WMA"
+        result := ta.wma(src, len)
+    else if type == "RMA"
+        result := ta.rma(src, len)
+    result
+
+f_roundToTick(price) =>
+    math.round(price / syminfo.mintick) * syminfo.mintick
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██████████████████████ CPR CALCULATIONS (NON-REPAINTING) ████████████████████
+// ══════════════════════════════════════════════════════════════════════════════
+
+[prevHigh, prevLow, prevClose] = request.security(syminfo.tickerid, i_cprTimeframe, [high[1], low[1], close[1]], lookahead=barmerge.lookahead_off)
+
+bool validCPRData = not na(prevHigh) and not na(prevLow) and not na(prevClose)
+
+float pHigh = validCPRData ? prevHigh : na
+float pLow = validCPRData ? prevLow : na
+float pClose = validCPRData ? prevClose : na
+
+float pivot = validCPRData ? (pHigh + pLow + pClose) / 3 : na
+float bc = validCPRData ? (pHigh + pLow) / 2 : na
+float tc = validCPRData ? 2 * pivot - bc : na
+
+float cpr_top = validCPRData ? math.max(bc, tc) : na
+float cpr_bottom = validCPRData ? math.min(bc, tc) : na
+float cpr_middle = pivot
+
+var float r1 = na
+var float r2 = na
+var float s1 = na
+var float s2 = na
+
+if validCPRData
+    if i_cprType == "Traditional"
+        r1 := 2 * pivot - pLow
+        s1 := 2 * pivot - pHigh
+        r2 := pivot + (pHigh - pLow)
+        s2 := pivot - (pHigh - pLow)
+    else if i_cprType == "Fibonacci"
+        float range_hl = pHigh - pLow
+        r1 := pivot + 0.382 * range_hl
+        s1 := pivot - 0.382 * range_hl
+        r2 := pivot + 0.618 * range_hl
+        s2 := pivot - 0.618 * range_hl
+    else if i_cprType == "Camarilla"
+        float range_hl = pHigh - pLow
+        r1 := pClose + range_hl * 1.1 / 12
+        s1 := pClose - range_hl * 1.1 / 12
+        r2 := pClose + range_hl * 1.1 / 6
+        s2 := pClose - range_hl * 1.1 / 6
+
+// ══════════════════════════════════════════════════════════════════════════════
+// █████████████████████ INDICATOR CALCULATIONS █████████████████████████████████
+// ══════════════════════════════════════════════════════════════════════════════
+
+float maFast = f_ma(close, i_maFastLen, i_maFastType)
+float maSlow = f_ma(close, i_maSlowLen, i_maSlowType)
+float maTrend = f_ma(close, i_maTrendLen, i_maTrendType)
+
+// ✅ Използваме стойности от ПРЕДИШЕН бар за да не репейнтваме
+float maFast_1 = maFast[1]
+float maSlow_1 = maSlow[1]
+float maTrend_1 = maTrend[1]
+float close_1 = close[1]
+
+float atr = ta.atr(i_atrLength)
+float atr_1 = atr[1]
+
+float volMA = ta.sma(volume, i_volMaLen)
+bool highVolume = volume[1] > volMA[1] * i_volMultiplier
+
+float rsi = ta.rsi(close, i_rsiLength)
+float rsi_1 = rsi[1]
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ████████████████████████ TREND DETECTION █████████████████════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ——— Trend Components (на затворени барове) ———
+bool fastAboveSlow = maFast_1 > maSlow_1
+bool fastBelowSlow = maFast_1 < maSlow_1
+bool priceAboveTrendMA = close_1 > maTrend_1
+bool priceBelowTrendMA = close_1 < maTrend_1
+
+// ✅ ПОПРАВЕНО: Използваме if/else вместо switch за надеждност
+bool isUptrend = false
+bool isDowntrend = false
+
+if i_trendMode == "Price > Trend MA"
+    isUptrend := priceAboveTrendMA
+    isDowntrend := priceBelowTrendMA
+else if i_trendMode == "Fast MA > Slow MA"
+    isUptrend := fastAboveSlow
+    isDowntrend := fastBelowSlow
+else if i_trendMode == "Both Conditions"
+    isUptrend := fastAboveSlow and priceAboveTrendMA
+    isDowntrend := fastBelowSlow and priceBelowTrendMA
+
+// ——— MA Crossovers (на затворени барове) ———
+bool maCrossUp = maFast_1 > maSlow_1 and maFast[2] <= maSlow[2]
+bool maCrossDown = maFast_1 < maSlow_1 and maFast[2] >= maSlow[2]
+
+// ——— CPR Position (на затворен бар) ———
+bool priceAboveCPR = validCPRData and close_1 > cpr_top
+bool priceBelowCPR = validCPRData and close_1 < cpr_bottom
+bool priceInsideCPR = validCPRData and close_1 >= cpr_bottom and close_1 <= cpr_top
+
+float cprWidth = validCPRData ? (cpr_top - cpr_bottom) / pivot * 100 : 0
+bool narrowCPR = cprWidth < 0.3 and cprWidth > 0
+bool wideCPR = cprWidth > 1.0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ████████████████████████ FILTER CONDITIONS ═══════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+
+bool inSession = i_tradingHours ? not na(time(timeframe.period, i_sessionTime)) : true
+
+// ✅ ПОПРАВЕНО: Trend Filter логика
+bool trendAllowsLong = true
+bool trendAllowsShort = true
+
+if i_useTrendFilter
+    trendAllowsLong := isUptrend
+    trendAllowsShort := isDowntrend
+
+bool volumeOK = i_useVolumeFilter ? highVolume : true
+bool rsiAllowsLong = i_useRSIFilter ? (rsi_1 < i_rsiOverbought) : true
+bool rsiAllowsShort = i_useRSIFilter ? (rsi_1 > i_rsiOversold) : true
+
+bool canLong = (i_direction == "Long Only" or i_direction == "Both")
+bool canShort = (i_direction == "Short Only" or i_direction == "Both")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// █████████████████████████ ENTRY CONDITIONS ═══════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ——— Confirmation: Price must stay above/below level for X bars ———
+bool confirmedAboveCPR = true
+bool confirmedBelowCPR = true
+
+for i = 1 to i_confirmBars
+    if close[i] <= cpr_top
+        confirmedAboveCPR := false
+    if close[i] >= cpr_bottom
+        confirmedBelowCPR := false
+
+// ——— Bounce Detection ———
+bool bounceFromS1 = validCPRData and low[1] <= s1 and close_1 > s1 and close_1 > open[1]
+bool bounceFromS2 = validCPRData and low[1] <= s2 and close_1 > s2 and close_1 > open[1]
+bool bounceFromR1 = validCPRData and high[1] >= r1 and close_1 < r1 and close_1 < open[1]
+bool bounceFromR2 = validCPRData and high[1] >= r2 and close_1 < r2 and close_1 < open[1]
+
+// ✅ ПОПРАВЕНО: Използваме if/else вместо switch за Entry Mode
+bool signalLong = false
+bool signalShort = false
+
+if i_entryMode == "CPR Breakout"
+    signalLong := priceAboveCPR and confirmedAboveCPR
+    signalShort := priceBelowCPR and confirmedBelowCPR
+else if i_entryMode == "CPR Bounce"
+    signalLong := bounceFromS1 or bounceFromS2
+    signalShort := bounceFromR1 or bounceFromR2
+else if i_entryMode == "CPR + MA Cross"
+    signalLong := priceAboveCPR and maCrossUp
+    signalShort := priceBelowCPR and maCrossDown
+else if i_entryMode == "Full Confluence"
+    signalLong := priceAboveCPR and maCrossUp and narrowCPR
+    signalShort := priceBelowCPR and maCrossDown and narrowCPR
+
+// ✅ Apply ALL Filters
+bool entryLongSignal = signalLong and canLong and inSession and inDateRange and validCPRData
+bool entryShortSignal = signalShort and canShort and inSession and inDateRange and validCPRData
+
+// ✅ Apply Trend Filter
+entryLongSignal := entryLongSignal and trendAllowsLong
+entryShortSignal := entryShortSignal and trendAllowsShort
+
+// ✅ Volume и RSI филтри
+entryLongSignal := entryLongSignal and volumeOK and rsiAllowsLong
+entryShortSignal := entryShortSignal and volumeOK and rsiAllowsShort
+
+// ✅ Prevent Multiple Entries
+bool notInPosition = strategy.position_size == 0
+entryLongSignal := entryLongSignal and notInPosition
+entryShortSignal := entryShortSignal and notInPosition
+
+// ✅ ANTI-REPAINT: Само на потвърдени барове
+entryLongSignal := entryLongSignal and barstate.isconfirmed
+entryShortSignal := entryShortSignal and barstate.isconfirmed
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ███████████████████████ STOP LOSS & TAKE PROFIT ══════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float activeLongSL = na
+var float activeLongTP = na
+var float activeShortSL = na
+var float activeShortTP = na
+var float activeEntryPrice = na
+
+if entryLongSignal
+    activeEntryPrice := close
+    if i_exitMode == "ATR Based"
+        activeLongSL := close - atr_1 * i_atrMultSL
+        activeLongTP := close + atr_1 * i_atrMultTP
+    else if i_exitMode == "Fixed Percent"
+        activeLongSL := close * (1 - i_fixedSLPercent / 100)
+        activeLongTP := close * (1 + i_fixedTPPercent / 100)
+    else if i_exitMode == "CPR Levels"
+        activeLongSL := s1
+        activeLongTP := r1
+    else if i_exitMode == "Trailing Stop"
+        activeLongSL := close * (1 - i_fixedSLPercent / 100)
+        activeLongTP := na
+
+if entryShortSignal
+    activeEntryPrice := close
+    if i_exitMode == "ATR Based"
+        activeShortSL := close + atr_1 * i_atrMultSL
+        activeShortTP := close - atr_1 * i_atrMultTP
+    else if i_exitMode == "Fixed Percent"
+        activeShortSL := close * (1 + i_fixedSLPercent / 100)
+        activeShortTP := close * (1 - i_fixedTPPercent / 100)
+    else if i_exitMode == "CPR Levels"
+        activeShortSL := r1
+        activeShortTP := s1
+    else if i_exitMode == "Trailing Stop"
+        activeShortSL := close * (1 + i_fixedSLPercent / 100)
+        activeShortTP := na
+
+// ——— Trailing Stop Logic ———
+var float trailStopLong = na
+var float trailStopShort = na
+
+if strategy.position_size > 0 and i_exitMode == "Trailing Stop" and not na(activeEntryPrice)
+    float profitPercent = (close - activeEntryPrice) / activeEntryPrice * 100
+    if profitPercent >= i_trailActivation
+        float newTrailStop = close * (1 - i_trailPercent / 100)
+        if na(trailStopLong) or newTrailStop > trailStopLong
+            trailStopLong := newTrailStop
+
+if strategy.position_size < 0 and i_exitMode == "Trailing Stop" and not na(activeEntryPrice)
+    float profitPercent = (activeEntryPrice - close) / activeEntryPrice * 100
+    if profitPercent >= i_trailActivation
+        float newTrailStop = close * (1 + i_trailPercent / 100)
+        if na(trailStopShort) or newTrailStop < trailStopShort
+            trailStopShort := newTrailStop
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    activeLongSL := na
+    activeLongTP := na
+    activeShortSL := na
+    activeShortTP := na
+    activeEntryPrice := na
+    trailStopLong := na
+    trailStopShort := na
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ███████████████████████ WEBHOOK MESSAGE BUILDER ══════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+
+string webhookLongEntry = '{"action":"open_long","symbol":"' + i_symbol + '","leverage":' + str.tostring(i_leverage) + ',"margin_mode":"' + i_marginMode + '"}'
+string webhookShortEntry = '{"action":"open_short","symbol":"' + i_symbol + '","leverage":' + str.tostring(i_leverage) + ',"margin_mode":"' + i_marginMode + '"}'
+string webhookCloseLong = '{"action":"close_long","symbol":"' + i_symbol + '"}'
+string webhookCloseShort = '{"action":"close_short","symbol":"' + i_symbol + '"}'
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██████████████████████████ STRATEGY EXECUTION ════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+
+if entryLongSignal
+    strategy.entry("Long", strategy.long, alert_message = i_useWebhook ? webhookLongEntry : "Long Entry")
+
+if entryShortSignal
+    strategy.entry("Short", strategy.short, alert_message = i_useWebhook ? webhookShortEntry : "Short Entry")
+
+if strategy.position_size > 0
+    if i_exitMode == "Trailing Stop" and not na(trailStopLong)
+        strategy.exit("Long Exit", "Long", stop = trailStopLong, alert_message = i_useWebhook ? webhookCloseLong : "Long Exit Trail")
+    else if not na(activeLongSL) and not na(activeLongTP)
+        strategy.exit("Long Exit", "Long", stop = activeLongSL, limit = activeLongTP, alert_message = i_useWebhook ? webhookCloseLong : "Long Exit")
+    else if not na(activeLongSL)
+        strategy.exit("Long Exit", "Long", stop = activeLongSL, alert_message = i_useWebhook ? webhookCloseLong : "Long Exit SL")
+
+if strategy.position_size < 0
+    if i_exitMode == "Trailing Stop" and not na(trailStopShort)
+        strategy.exit("Short Exit", "Short", stop = trailStopShort, alert_message = i_useWebhook ? webhookCloseShort : "Short Exit Trail")
+    else if not na(activeShortSL) and not na(activeShortTP)
+        strategy.exit("Short Exit", "Short", stop = activeShortSL, limit = activeShortTP, alert_message = i_useWebhook ? webhookCloseShort : "Short Exit")
+    else if not na(activeShortSL)
+        strategy.exit("Short Exit", "Short", stop = activeShortSL, alert_message = i_useWebhook ? webhookCloseShort : "Short Exit SL")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ██████████████████████████████ PLOTTING ══════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+
+plot(i_showCPR and validCPRData ? cpr_top : na, "CPR Top", color=i_cprColor, linewidth=2, style=plot.style_linebr)
+plot(i_showCPR and validCPRData ? cpr_middle : na, "Pivot", color=i_cprColor, linewidth=1, style=plot.style_circles)
+plot(i_showCPR and validCPRData ? cpr_bottom : na, "CPR Bottom", color=i_cprColor, linewidth=2, style=plot.style_linebr)
+
+cprTopPlot = plot(i_showCPR and validCPRData ? cpr_top : na, display=display.none)
+cprBotPlot = plot(i_showCPR and validCPRData ? cpr_bottom : na, display=display.none)
+fill(cprTopPlot, cprBotPlot, color=color.new(i_cprColor, 85), title="CPR Fill")
+
+plot(i_showSR and validCPRData ? r1 : na, "R1", color=i_resistanceColor, linewidth=1, style=plot.style_linebr)
+plot(i_showSR and validCPRData ? r2 : na, "R2", color=i_resistanceColor, linewidth=1, style=plot.style_linebr)
+plot(i_showSR and validCPRData ? s1 : na, "S1", color=i_supportColor, linewidth=1, style=plot.style_linebr)
+plot(i_showSR and validCPRData ? s2 : na, "S2", color=i_supportColor, linewidth=1, style=plot.style_linebr)
+
+plot(i_showMAs ? maFast : na, "Fast MA", color=color.new(color.yellow, 0), linewidth=1)
+plot(i_showMAs ? maSlow : na, "Slow MA", color=color.new(color.orange, 0), linewidth=1)
+plot(i_showMAs ? maTrend : na, "Trend MA", color=color.new(color.white, 50), linewidth=2)
+
+if i_showLabels and entryLongSignal
+    label.new(bar_index, low, "▲ LONG", color=color.new(color.green, 20), textcolor=color.white, style=label.style_label_up, size=size.small)
+
+if i_showLabels and entryShortSignal
+    label.new(bar_index, high, "▼ SHORT", color=color.new(color.red, 20), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 90) : strategy.position_size < 0 ? color.new(color.red, 90) : na, title="Position Background")
+
+plot(strategy.position_size > 0 and not na(activeLongSL) ? activeLongSL : na, "Long SL", color=color.red, linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size > 0 and not na(activeLongTP) ? activeLongTP : na, "Long TP", color=color.green, linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size < 0 and not na(activeShortSL) ? activeShortSL : na, "Short SL", color=color.red, linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size < 0 and not na(activeShortTP) ? activeShortTP : na, "Short TP", color=color.green, linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size > 0 and not na(trailStopLong) ? trailStopLong : na, "Trail Long", color=color.orange, linewidth=1, style=plot.style_linebr)
+plot(strategy.position_size < 0 and not na(trailStopShort) ? trailStopShort : na, "Trail Short", color=color.orange, linewidth=1, style=plot.style_linebr)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ████████████████████████████ INFO TABLE ══════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+
+getTablePosition(pos) =>
+    result = position.top_right
+    if pos == "top_left"
+        result := position.top_left
+    else if pos == "top_center"
+        result := position.top_center
+    else if pos == "top_right"
+        result := position.top_right
+    else if pos == "middle_left"
+        result := position.middle_left
+    else if pos == "middle_center"
+        result := position.middle_center
+    else if pos == "middle_right"
+        result := position.middle_right
+    else if pos == "bottom_left"
+        result := position.bottom_left
+    else if pos == "bottom_center"
+        result := position.bottom_center
+    else if pos == "bottom_right"
+        result := position.bottom_right
+    result
+
+getTableSize(sz) =>
+    result = size.small
+    if sz == "tiny"
+        result := size.tiny
+    else if sz == "small"
+        result := size.small
+    else if sz == "normal"
+        result := size.normal
+    else if sz == "large"
+        result := size.large
+    result
+
+var table infoTable = table.new(getTablePosition(i_tablePosition), 2, 12, bgcolor=color.new(color.black, 80), frame_color=color.new(color.gray, 50), frame_width=1, border_color=color.new(color.gray, 70), border_width=1)
+
+tableSize = getTableSize(i_tableSize)
+
+if barstate.isconfirmed and i_showTable
+    // Header
+    table.cell(infoTable, 0, 0, "CPR v2.2", bgcolor=color.new(color.blue, 50), text_color=color.white, text_size=tableSize, text_halign=text.align_center)
+    table.cell(infoTable, 1, 0, i_cprTimeframe + " | " + i_cprType, bgcolor=color.new(color.blue, 50), text_color=color.white, text_size=tableSize, text_halign=text.align_center)
+    
+    // CPR Position
+    string cprPosText = priceAboveCPR ? "ABOVE" : priceBelowCPR ? "BELOW" : "INSIDE"
+    color cprPosColor = priceAboveCPR ? color.green : priceBelowCPR ? color.red : color.orange
+    table.cell(infoTable, 0, 1, "CPR Position", text_color=color.white, text_size=tableSize)
+    table.cell(infoTable, 1, 1, cprPosText, text_color=cprPosColor, text_size=tableSize, text_halign=text.align_center)
+    
+    // Trend Status
+    string trendText = isUptrend ? "▲ UPTREND" : isDowntrend ? "▼ DOWNTREND" : "— NEUTRAL"
+    color trendColor = isUptrend ? color.green : isDowntrend ? color.red : color.gray
+    table.cell(infoTable, 0, 2, "Trend (" + i_trendMode + ")", text_color=color.white, text_size=tableSize)
+    table.cell(infoTable, 1, 2, trendText, text_color=trendColor, text_size=tableSize, text_halign=text.align_center)
+    
+    // Trend Filter Status
+    string filterText = i_useTrendFilter ? "ON" : "OFF"
+    string allowsText = ""
+    if i_useTrendFilter
+        allowsText := (trendAllowsLong ? " L✓" : " L✗") + (trendAllowsShort ? " S✓" : " S✗")
+    else
+        allowsText := " ALL"
+    color filterColor = i_useTrendFilter ? (isUptrend or isDowntrend ? color.lime : color.yellow) : color.gray
+    table.cell(infoTable, 0, 3, "Trend Filter", text_color=color.white, text_size=tableSize)
+    table.cell(infoTable, 1, 3, filterText + allowsText, text_color=filterColor, text_size=tableSize, text_halign=text.align_center)
+    
+    // MA Values for debugging
+    string maInfo = "F:" + str.tostring(maFast_1, "#.##") + " S:" + str.tostring(maSlow_1, "#.##") + " T:" + str.tostring(maTrend_1, "#.##")
+    table.cell(infoTable, 0, 4, "MA Values", text_color=color.white, text_size=tableSize)
+    table.cell(infoTable, 1, 4, maInfo, text_color=color.white, text_size=tableSize, text_halign=text.align_center)
+    
+    // Pivot
+    table.cell(infoTable, 0, 5, "Pivot", text_color=color.white, text_size=tableSize)
+    table.cell(infoTable, 1, 5, str.tostring(f_roundToTick(pivot)), text_color=i_cprColor, text_size=tableSize, text_halign=text.align_center)
+    
+    // R1 / S1
+    table.cell(infoTable, 0, 6, "R1 / S1", text_color=color.white, text_size=tableSize)
+    table.cell(infoTable, 1, 6, str.tostring(f_roundToTick(r1)) + " / " + str.tostring(f_roundToTick(s1)), text_color=color.white, text_size=tableSize, text_halign=text.align_center)
+    
+    // Position
+    string posText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    color posColor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(infoTable, 0, 7, "Position", text_color=color.white, text_size=tableSize)
+    table.cell(infoTable, 1, 7, posText, text_color=posColor, text_size=tableSize, text_halign=text.align_center)
+    
+    // Stop Loss
+    string slText = strategy.position_size > 0 ? str.tostring(f_roundToTick(nz(activeLongSL))) : strategy.position_size < 0 ? str.tostring(f_roundToTick(nz(activeShortSL))) : "—"
+    table.cell(infoTable, 0, 8, "Stop Loss", text_color=color.white, text_size=tableSize)
+    table.cell(infoTable, 1, 8, slText, text_color=color.red, text_size=tableSize, text_halign=text.align_center)
+    
+    // Take Profit
+    string tpText = strategy.position_size > 0 ? str.tostring(f_roundToTick(nz(activeLongTP))) : strategy.position_size < 0 ? str.tostring(f_roundToTick(nz(activeShortTP))) : "—"
+    table.cell(infoTable, 0, 9, "Take Profit", text_color=color.white, text_size=tableSize)
+    table.cell(infoTable, 1, 9, tpText, text_color=color.green, text_size=tableSize, text_halign=text.align_center)
+    
+    // Entry Mode
+    table.cell(infoTable, 0, 10, "Entry Mode", text_color=color.white, text_size=tableSize)
+    table.cell(infoTable, 1, 10, i_entryMode, text_color=color.white, text_size=tableSize, text_halign=text.align_center)
+    
+    // Exit Mode
+    table.cell(infoTable, 0, 11, "Exit Mode", text_color=color.white, text_size=tableSize)
+    table.cell(infoTable, 1, 11, i_exitMode, text_color=color.white, text_size=tableSize, text_halign=text.align_center)

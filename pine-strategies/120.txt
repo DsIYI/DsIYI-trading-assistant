@@ -1,0 +1,131 @@
+//@version=5
+indicator("Advanced Bitget Trading Bot", overlay=true, max_labels_count=500)
+
+// ====== ВХОДНИ ПАРАМЕТРИ ======
+group1 = "═══════════ Strategy Settings ═══════════"
+rsiLength = input.int(14, "RSI Length", group=group1)
+rsiOverbought = input.int(70, "RSI Overbought", group=group1)
+rsiOversold = input.int(30, "RSI Oversold", group=group1)
+confirmBars = input.int(1, "Confirmation Bars", minval=0, group=group1)
+
+group2 = "═══════════ Risk Management ═══════════"
+accountBalance = input.float(1000, "Account Balance (USDT)", group=group2)
+riskPercent = input.float(1.0, "Risk Per Trade (%)", minval=0.1, maxval=10, group=group2)
+leverage = input.int(10, "Leverage", minval=1, maxval=125, group=group2)
+stopLossPercent = input.float(2.0, "Stop Loss (%)", minval=0.1, group=group2)
+takeProfitPercent = input.float(4.0, "Take Profit (%)", minval=0.1, group=group2)
+
+group3 = "═══════════ Webhook Settings ═══════════"
+webhookURL = input.string("YOUR_WEBHOOK_URL", "Webhook URL", group=group3)
+apiKey = input.string("YOUR_API_KEY", "API Key", group=group3)
+secretKey = input.string("YOUR_SECRET_KEY", "Secret Key", group=group3)
+passphrase = input.string("YOUR_PASSPHRASE", "Passphrase", group=group3)
+
+// ====== ИЗЧИСЛЕНИЯ ======
+rsi = ta.rsi(close, rsiLength)
+
+// Position Size Calculation
+riskAmount = accountBalance * (riskPercent / 100)
+positionSize = (riskAmount * leverage) / (stopLossPercent / 100)
+
+// Entry Conditions
+longCondition = rsi < rsiOversold and rsi > rsi[1] and close > close[1]
+shortCondition = rsi > rsiOverbought and rsi < rsi[1] and close < close[1]
+
+// Confirmations
+longSignal = longCondition and (confirmBars == 0 or longCondition[confirmBars])
+shortSignal = shortCondition and (confirmBars == 0 or shortCondition[confirmBars])
+
+// Calculate TP/SL levels
+longSL = close * (1 - stopLossPercent / 100)
+longTP = close * (1 + takeProfitPercent / 100)
+shortSL = close * (1 + stopLossPercent / 100)
+shortTP = close * (1 - takeProfitPercent / 100)
+
+// ====== STATE MANAGEMENT ======
+var bool inLongPosition = false
+var bool inShortPosition = false
+var float entryPrice = 0.0
+var float currentSL = 0.0
+var float currentTP = 0.0
+
+// Position Management
+if longSignal and not inLongPosition
+    inLongPosition := true
+    inShortPosition := false
+    entryPrice := close
+    currentSL := longSL
+    currentTP := longTP
+    
+if shortSignal and not inShortPosition
+    inShortPosition := true
+    inLongPosition := false
+    entryPrice := close
+    currentSL := shortSL
+    currentTP := shortTP
+
+// Exit Conditions
+longExit = inLongPosition and (close <= currentSL or close >= currentTP)
+shortExit = inShortPosition and (close >= currentSL or close <= currentTP)
+
+if longExit
+    inLongPosition := false
+    
+if shortExit
+    inShortPosition := false
+
+// ====== WEBHOOK MESSAGES (всички на един ред) ======
+// Open Long Position
+openLongMsg = '{"action":"open","symbol":"' + syminfo.ticker + '","side":"long","leverage":' + str.tostring(leverage) + ',"size":' + str.tostring(positionSize) + ',"sl":' + str.tostring(longSL) + ',"tp":' + str.tostring(longTP) + ',"apiKey":"' + apiKey + '","secret":"' + secretKey + '","passphrase":"' + passphrase + '"}'
+
+// Open Short Position  
+openShortMsg = '{"action":"open","symbol":"' + syminfo.ticker + '","side":"short","leverage":' + str.tostring(leverage) + ',"size":' + str.tostring(positionSize) + ',"sl":' + str.tostring(shortSL) + ',"tp":' + str.tostring(shortTP) + ',"apiKey":"' + apiKey + '","secret":"' + secretKey + '","passphrase":"' + passphrase + '"}'
+
+// Close Position Messages
+closeLongMsg = '{"action":"close","symbol":"' + syminfo.ticker + '","side":"long"}'
+closeShortMsg = '{"action":"close","symbol":"' + syminfo.ticker + '","side":"short"}'
+
+// ====== ALERTS ======
+// Entry Alerts
+if longSignal and not inLongPosition[1]
+    alert(openLongMsg, alert.freq_once_per_bar)
+    label.new(bar_index, low, "LONG\n" + str.tostring(positionSize) + " USDT", color=color.green, style=label.style_label_up, textcolor=color.white)
+
+if shortSignal and not inShortPosition[1]
+    alert(openShortMsg, alert.freq_once_per_bar)
+    label.new(bar_index, high, "SHORT\n" + str.tostring(positionSize) + " USDT", color=color.red, style=label.style_label_down, textcolor=color.white)
+
+// Exit Alerts
+if longExit
+    alert(closeLongMsg, alert.freq_once_per_bar)
+    label.new(bar_index, high, "CLOSE LONG", color=color.orange, style=label.style_label_down, textcolor=color.white)
+
+if shortExit
+    alert(closeShortMsg, alert.freq_once_per_bar)
+    label.new(bar_index, low, "CLOSE SHORT", color=color.orange, style=label.style_label_up, textcolor=color.white)
+
+// ====== ВИЗУАЛИЗАЦИЯ ======
+// Plot RSI
+rsiPlot = plot(rsi, "RSI", color=color.blue, display=display.none)
+hline(rsiOverbought, "Overbought", color=color.red, linestyle=hline.style_dashed)
+hline(rsiOversold, "Oversold", color=color.green, linestyle=hline.style_dashed)
+
+// Position Lines
+if inLongPosition
+    line.new(bar_index[1], entryPrice, bar_index, entryPrice, color=color.blue, width=2)
+    line.new(bar_index[1], currentSL, bar_index, currentSL, color=color.red, width=1, style=line.style_dashed)
+    line.new(bar_index[1], currentTP, bar_index, currentTP, color=color.green, width=1, style=line.style_dashed)
+
+if inShortPosition
+    line.new(bar_index[1], entryPrice, bar_index, entryPrice, color=color.purple, width=2)
+    line.new(bar_index[1], currentSL, bar_index, currentSL, color=color.red, width=1, style=line.style_dashed)
+    line.new(bar_index[1], currentTP, bar_index, currentTP, color=color.green, width=1, style=line.style_dashed)
+
+// Info Table
+var table infoTable = table.new(position.top_right, 2, 5)
+table.cell(infoTable, 0, 0, "Status:", bgcolor=color.gray, text_color=color.white)
+table.cell(infoTable, 1, 0, inLongPosition ? "LONG" : inShortPosition ? "SHORT" : "NO POSITION", bgcolor=inLongPosition ? color.green : inShortPosition ? color.red : color.gray, text_color=color.white)
+table.cell(infoTable, 0, 1, "Position Size:", bgcolor=color.gray, text_color=color.white)
+table.cell(infoTable, 1, 1, str.tostring(positionSize, "#.##") + " USDT", bgcolor=color.gray, text_color=color.white)
+table.cell(infoTable, 0, 2, "Leverage:", bgcolor=color.gray, text_color=color.white)
+table.cell(infoTable, 1, 2, str.tostring(leverage) + "x", bgcolor=color.gray, text_color=color.white)

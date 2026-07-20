@@ -1,0 +1,63 @@
+//@version=6
+strategy('MYX CBMA Bollinger Bands Strategy directed [ChuckBanger]', overlay = true, default_qty_type = strategy.percent_of_equity, default_qty_value = 100)
+
+// === INPUTS ===
+// Strategy Time Window
+startYear = input.int(2024, 'From Year', minval = 2020)
+startMonth = input.int(1, 'From Month', minval = 1, maxval = 12)
+startDay = input.int(1, 'From Day', minval = 1, maxval = 31)
+endYear = input.int(2025, 'To Year', minval = 2020)
+endMonth = input.int(12, 'To Month', minval = 1, maxval = 12)
+endDay = input.int(31, 'To Day', minval = 1, maxval = 31)
+
+startTime = timestamp(startYear, startMonth, startDay, 0, 0)
+endTime = timestamp(endYear, endMonth, endDay, 23, 59)
+inDateRange = time >= startTime and time <= endTime
+
+// === CBMA BB Parameters ===
+useCBMA = input.bool(true, 'Regular BB or CBMA?')
+length = input.int(20, title = 'BB Length')
+mult = input.float(2.0, title = 'BB Multiplier')
+
+// === Trailing Stop Settings ===
+useTrailingStop = input.bool(true, 'Enable Trailing Stop')
+trailingPerc = input.float(0.5, 'Trailing Stop %', step = 0.1)
+offsetTicks = input.int(0, 'Trailing Stop Offset (in ticks)', minval = 0)
+
+// === Entry Mode ===
+reversalMode = input.bool(true, 'Use Reversal Mode (Opposed Signal Entry)')
+
+// === Logic ===
+middle = ta.sma(close, length)
+upper = middle + mult * ta.stdev(close, length)
+lower = middle - mult * ta.stdev(close, length)
+
+// === Entry Conditions ===
+longCondition = ta.crossover(close, upper)
+shortCondition = ta.crossunder(close, lower)
+
+// === Reversal Entries ===
+if reversalMode
+    if longCondition and inDateRange
+        strategy.close('Sell Short')
+        strategy.entry('Buy Long', strategy.long)
+    if shortCondition and inDateRange
+        strategy.close('Buy Long')
+        strategy.entry('Sell Short', strategy.short)
+else
+    if longCondition and inDateRange
+        strategy.entry('Buy Long', strategy.long)
+    if shortCondition and inDateRange
+        strategy.entry('Sell Short', strategy.short)
+
+// === Trailing Stop ===
+if useTrailingStop
+    strategy.exit('Exit Long', from_entry = 'Buy Long', trail_price = na, trail_offset = trailingPerc / 100 * close)
+    strategy.exit('Exit Short', from_entry = 'Sell Short', trail_price = na, trail_offset = trailingPerc / 100 * close)
+
+// === Plotting ===
+plot(middle, title = 'BB Basis', color = color.gray)
+plot(upper, title = 'BB Upper', color = color.red)
+plot(lower, title = 'BB Lower', color = color.green)
+
+bgcolor(inDateRange ? color.new(color.green, 90) : na)

@@ -1,0 +1,30 @@
+//@version=5
+indicator("Candle Strength Meter", overlay=false)
+
+// Изчисления
+bodySize = math.abs(close - open)
+totalRange = high - low
+avgBody = ta.sma(bodySize, 20)
+avgRange = ta.sma(totalRange, 20)
+avgVolume = ta.sma(volume, 20)
+
+// Нормализирани стойности (0-100)
+bodyStrength = math.min(bodySize / avgBody * 50, 100)
+rangeStrength = math.min(totalRange / avgRange * 50, 100)
+volumeStrength = math.min(volume / avgVolume * 50, 100)
+
+// Комбиниран индекс
+candleIndex = (bodyStrength + rangeStrength + volumeStrength) / 3
+
+// Посока
+direction = close > open ? 1 : -1
+directedIndex = candleIndex * direction
+
+// Визуализация
+plot(directedIndex, "Candle Strength", color=directedIndex > 0 ? color.green : color.red, style=plot.style_columns)
+hline(50, "Strong Bull", color=color.green, linestyle=hline.style_dotted)
+hline(-50, "Strong Bear", color=color.red, linestyle=hline.style_dotted)
+hline(0, "Neutral", color=color.gray)
+
+// Зони
+bgcolor(directedIndex > 70 ? color.new(color.green, 80) : directedIndex < -70 ? color.new(color.red, 80) : na)

@@ -1,0 +1,31 @@
+//@version=5
+indicator("Custom EMA Pullback Strategy", overlay=true)
+
+// Input parameters
+var int ema_period = input.int(50, title="EMA Period")
+var float stop_loss_distance = input.float(1.0, title="Stop Loss Distance", step=0.1)
+var float target_distance = input.float(2.0, title="Target Distance", step=0.1)
+var bool enable_entry_reasons = input.bool(true, title="Enable Entry Reasons")
+var bool enable_exit_reasons = input.bool(true, title="Enable Exit Reasons")
+
+// Calculate EMA
+var float ema = ta.ema(close, ema_period)
+
+// Conditions for long entry
+bool bullish_engulfing = close[1] < open[1] and close > open and close > open[1] and open < close[1]
+bool long_condition = bullish_engulfing and enable_entry_reasons
+
+if (long_condition)
+    // Simulating order function
+    order("Long", strategy.long, stop_loss_distance, target_distance)
+
+// Conditions for short entry
+bool bearish_engulfing = close[1] > open[1] and close < open and close < open[1] and open > close[1]
+bool short_condition = ta.crossunder(close, ema) and bearish_engulfing and enable_entry_reasons
+
+if (short_condition)
+    // Simulating order function
+    order("Short", strategy.short, stop_loss_distance, target_distance)
+
+// Plot EMA
+plot(ema, title="EMA", color=color.blue)

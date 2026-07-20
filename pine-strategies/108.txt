@@ -1,0 +1,417 @@
+//@version=5
+indicator("Crypto Hunter PRO [BITGET]", overlay=true, max_labels_count=500, max_bars_back=5000)
+
+// ═══════════════════════════════════════════════════════════════
+// BITGET WEBHOOK НАСТРОЙКИ
+// ═══════════════════════════════════════════════════════════════
+grpWebhook = "🤖 BITGET WEBHOOK"
+enableWebhook = input.bool(true, "Активирай Webhook", group=grpWebhook)
+signalToken = input.string("", "Signal Token (от Bitget)", tooltip="Копирай от Bitget Signal Bot настройките", group=grpWebhook)
+marginCoin = input.string("USDT", "Margin Coin", options=["USDT", "USDC"], group=grpWebhook)
+productType = input.string("USDT-FUTURES", "Product Type", options=["USDT-FUTURES", "COIN-FUTURES", "USDC-FUTURES"], group=grpWebhook)
+
+grpPosition = "📊 ПОЗИЦИЯ"
+leverage = input.float(10, "Leverage (x)", minval=1, maxval=125, group=grpPosition)
+positionSize = input.float(100, "Position Size (%)", minval=1, maxval=100, group=grpPosition)
+marginMode = input.string("crossed", "Margin Mode", options=["crossed", "isolated"], group=grpPosition)
+
+grpRisk = "⚠️ RISK MANAGEMENT"
+atrMultSL = input.float(1.5, "ATR за SL", minval=0.5, maxval=5.0, group=grpRisk)
+atrMultTP1 = input.float(2.0, "ATR за TP1", minval=1.0, maxval=5.0, group=grpRisk)
+atrMultTP2 = input.float(3.0, "ATR за TP2", minval=1.5, maxval=8.0, group=grpRisk)
+atrMultTP3 = input.float(5.0, "ATR за TP3", minval=2.0, maxval=12.0, group=grpRisk)
+useTrailingStop = input.bool(true, "Trailing Stop след TP1", group=grpRisk)
+useBitgetSLTP = input.bool(true, "Изпрати SL/TP към Bitget", tooltip="Bitget ще постави SL/TP автоматично", group=grpRisk)
+
+grp1 = "🕯️ АНАЛИЗ"
+lookback = input.int(14, "Период", minval=5, maxval=50, group=grp1)
+bodyMultiplier = input.float(1.5, "Голяма свещ (x)", group=grp1)
+dojiThreshold = input.float(0.1, "Doji праг", group=grp1)
+volMultiplier = input.float(1.5, "Висок обем (x)", group=grp1)
+useTrendFilter = input.bool(true, "Тренд филтър", group=grp1)
+useMarketStructure = input.bool(true, "Market Structure", group=grp1)
+useMTF = input.bool(true, "MTF анализ", group=grp1)
+htfTimeframe = input.timeframe("60", "HTF", group=grp1)
+
+grp8 = "🎯 СИГНАЛИ"
+minScore = input.float(5.0, "Мин. скор", minval=1.0, maxval=20.0, group=grp8)
+strongSignalScore = input.float(8.0, "Силен сигнал", minval=5.0, maxval=25.0, group=grp8)
+useConfluence = input.bool(true, "Конфлуенция", group=grp8)
+minConfluence = input.int(3, "Мин. конфлуенция", minval=1, maxval=10, group=grp8)
+
+grp10 = "🎨 ВИЗУАЛИЗАЦИЯ"
+showEMAs = input.bool(true, "EMAs", group=grp10)
+showTable = input.bool(true, "Таблица", group=grp10)
+showSLTP = input.bool(true, "SL/TP", group=grp10)
+colorBars = input.bool(true, "Оцвети свещи", group=grp10)
+
+// ═══════════════════════════════════════════════════════════════
+// ПОЗИЦИЯ TRACKING
+// ═══════════════════════════════════════════════════════════════
+var bool inLong = false
+var bool inShort = false
+var float entry = na
+var float sl = na
+var float tp1 = na
+var float tp2 = na
+var float tp3 = na
+var bool tp1Hit = false
+var bool tp2Hit = false
+
+// ═══════════════════════════════════════════════════════════════
+// ИЗЧИСЛЕНИЯ
+// ═══════════════════════════════════════════════════════════════
+bodySize = math.abs(close - open)
+totalRange = high - low
+bodyToRange = totalRange > 0 ? bodySize / totalRange : 0
+upperWickRatio = totalRange > 0 ? (high - math.max(close, open)) / totalRange : 0
+lowerWickRatio = totalRange > 0 ? (math.min(close, open) - low) / totalRange : 0
+
+avgBody = ta.sma(bodySize, lookback)
+avgVolume = ta.sma(volume, 20)
+atr = ta.atr(14)
+
+isBullish = close > open
+isBearish = close < open
+isLargeBody = bodySize > avgBody * bodyMultiplier
+isSmallBody = bodySize < avgBody * 0.5
+isDoji = bodyToRange < dojiThreshold
+isHighVolume = volume > avgVolume * volMultiplier
+isVeryHighVolume = volume > avgVolume * 2.0
+isLowVolume = volume < avgVolume * 0.5
+volumeRatio = avgVolume > 0 ? volume / avgVolume : 0
+
+// Индикатори
+rsi = ta.rsi(close, 14)
+rsiOB = rsi > 70
+rsiOS = rsi < 30
+
+ema9 = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+ema50 = ta.ema(close, 50)
+vwapVal = ta.vwap(hlc3)
+
+bullTrend = ema9 > ema21 and ema21 > ema50
+bearTrend = ema9 < ema21 and ema21 < ema50
+emaCrossUp = ta.crossover(ema9, ema21)
+emaCrossDown = ta.crossunder(ema9, ema21)
+
+[macdLine, signalLine, hist] = ta.macd(close, 12, 26, 9)
+macdBullish = macdLine > signalLine
+macdCrossUp = ta.crossover(macdLine, signalLine)
+macdCrossDown = ta.crossunder(macdLine, signalLine)
+
+stochK = ta.sma(ta.stoch(close, high, low, 14), 3)
+stochBullish = stochK > ta.sma(stochK, 3)
+
+[supertrend, dir] = ta.supertrend(3, 10)
+stBullish = dir < 0
+
+// MTF
+htfClose = request.security(syminfo.tickerid, htfTimeframe, close)
+htfEma21 = request.security(syminfo.tickerid, htfTimeframe, ta.ema(close, 21))
+htfEma50 = request.security(syminfo.tickerid, htfTimeframe, ta.ema(close, 50))
+htfTrendUp = htfClose > htfEma21 and htfEma21 > htfEma50
+htfTrendDown = htfClose < htfEma21 and htfEma21 < htfEma50
+
+// Structure
+swingH = ta.pivothigh(high, 10, 10)
+swingL = ta.pivotlow(low, 10, 10)
+var float lastHigh = na
+var float lastLow = na
+if not na(swingH)
+    lastHigh := swingH
+if not na(swingL)
+    lastLow := swingL
+bosUp = not na(lastHigh) and close > lastHigh and close[1] <= lastHigh
+bosDown = not na(lastLow) and close < lastLow and close[1] >= lastLow
+
+// ═══════════════════════════════════════════════════════════════
+// МОДЕЛИ
+// ═══════════════════════════════════════════════════════════════
+isHammer = lowerWickRatio > 0.6 and upperWickRatio < 0.15 and bodyToRange < 0.35 and bodyToRange > 0.05
+isShootingStar = upperWickRatio > 0.6 and lowerWickRatio < 0.15 and bodyToRange < 0.35
+isPinBull = lowerWickRatio > 0.65 and bodyToRange < 0.25
+isPinBear = upperWickRatio > 0.65 and bodyToRange < 0.25
+isMaruBull = isBullish and bodyToRange > 0.9 and isLargeBody
+isMaruBear = isBearish and bodyToRange > 0.9 and isLargeBody
+
+prevBody = math.abs(close[1] - open[1])
+prevMid = (open[1] + close[1]) / 2
+isBullEngulf = isBullish and isBearish[1] and open <= close[1] and close >= open[1] and bodySize > prevBody
+isBearEngulf = isBearish and isBullish[1] and open >= close[1] and close <= open[1] and bodySize > prevBody
+isPiercing = isBullish and isBearish[1] and open < low[1] and close > prevMid
+isDarkCloud = isBearish and isBullish[1] and open > high[1] and close < prevMid
+
+prev2Mid = (open[2] + close[2]) / 2
+isMorningStar = isBearish[2] and isLargeBody[2] and (isDoji[1] or isSmallBody[1]) and isBullish and close > prev2Mid
+isEveningStar = isBullish[2] and isLargeBody[2] and (isDoji[1] or isSmallBody[1]) and isBearish and close < prev2Mid
+
+// ═══════════════════════════════════════════════════════════════
+// СКОРИНГ
+// ═══════════════════════════════════════════════════════════════
+bullScore = (isHammer ? 2.5 : 0) + (isPinBull ? 3.0 : 0) + (isMaruBull ? 3.5 : 0) + (isBullEngulf ? 4.0 : 0) + (isPiercing ? 3.0 : 0) + (isMorningStar ? 5.0 : 0)
+bearScore = (isShootingStar ? 2.5 : 0) + (isPinBear ? 3.0 : 0) + (isMaruBear ? 3.5 : 0) + (isBearEngulf ? 4.0 : 0) + (isDarkCloud ? 3.0 : 0) + (isEveningStar ? 5.0 : 0)
+
+volMod = isVeryHighVolume ? 2.0 : isHighVolume ? 1.5 : isLowVolume ? 0.5 : 1.0
+rsiBullMod = rsiOS ? 1.8 : rsi < 40 ? 1.3 : rsiOB ? 0.6 : 1.0
+rsiBearMod = rsiOB ? 1.8 : rsi > 60 ? 1.3 : rsiOS ? 0.6 : 1.0
+trendBullMod = useTrendFilter ? (bullTrend ? 1.4 : bearTrend ? 0.5 : 1.0) : 1.0
+trendBearMod = useTrendFilter ? (bearTrend ? 1.4 : bullTrend ? 0.5 : 1.0) : 1.0
+vwapBullMod = close < vwapVal ? 1.3 : 1.0
+vwapBearMod = close > vwapVal ? 1.3 : 1.0
+emaCrossBullMod = emaCrossUp ? 1.8 : 1.0
+emaCrossBearMod = emaCrossDown ? 1.8 : 1.0
+macdBullMod = macdCrossUp ? 1.5 : macdBullish ? 1.2 : 1.0
+macdBearMod = macdCrossDown ? 1.5 : not macdBullish ? 1.2 : 1.0
+structBullMod = useMarketStructure ? (bosUp ? 1.5 : 1.0) : 1.0
+structBearMod = useMarketStructure ? (bosDown ? 1.5 : 1.0) : 1.0
+mtfBullMod = useMTF ? (htfTrendUp ? 1.4 : htfTrendDown ? 0.6 : 1.0) : 1.0
+mtfBearMod = useMTF ? (htfTrendDown ? 1.4 : htfTrendUp ? 0.6 : 1.0) : 1.0
+
+finalBull = bullScore * volMod * rsiBullMod * trendBullMod * vwapBullMod * emaCrossBullMod * macdBullMod * structBullMod * mtfBullMod
+finalBear = bearScore * volMod * rsiBearMod * trendBearMod * vwapBearMod * emaCrossBearMod * macdBearMod * structBearMod * mtfBearMod
+
+bullConf = (bullScore > 0 ? 1 : 0) + (isHighVolume ? 1 : 0) + (rsiOS or rsi < 40 ? 1 : 0) + (bullTrend ? 1 : 0) + (close < vwapVal ? 1 : 0) + (macdBullish ? 1 : 0) + (stochBullish ? 1 : 0) + (stBullish ? 1 : 0) + (htfTrendUp ? 1 : 0)
+bearConf = (bearScore > 0 ? 1 : 0) + (isHighVolume ? 1 : 0) + (rsiOB or rsi > 60 ? 1 : 0) + (bearTrend ? 1 : 0) + (close > vwapVal ? 1 : 0) + (not macdBullish ? 1 : 0) + (not stochBullish ? 1 : 0) + (not stBullish ? 1 : 0) + (htfTrendDown ? 1 : 0)
+
+confOkBull = not useConfluence or bullConf >= minConfluence
+confOkBear = not useConfluence or bearConf >= minConfluence
+
+strongLong = finalBull >= strongSignalScore and confOkBull
+strongShort = finalBear >= strongSignalScore and confOkBear
+normalLong = finalBull >= minScore and finalBull < strongSignalScore and confOkBull
+normalShort = finalBear >= minScore and finalBear < strongSignalScore and confOkBear
+
+anyLong = strongLong or normalLong
+anyShort = strongShort or normalShort
+
+// SL/TP
+newLongSL = close - atr * atrMultSL
+newLongTP1 = close + atr * atrMultTP1
+newLongTP2 = close + atr * atrMultTP2
+newLongTP3 = close + atr * atrMultTP3
+newShortSL = close + atr * atrMultSL
+newShortTP1 = close - atr * atrMultTP1
+newShortTP2 = close - atr * atrMultTP2
+newShortTP3 = close - atr * atrMultTP3
+
+// ═══════════════════════════════════════════════════════════════
+// POSITION MANAGEMENT
+// ═══════════════════════════════════════════════════════════════
+longSLHit = inLong and low <= sl
+longTP1Hit = inLong and not tp1Hit and high >= tp1
+longTP2Hit = inLong and tp1Hit and not tp2Hit and high >= tp2
+longTP3Hit = inLong and tp2Hit and high >= tp3
+
+shortSLHit = inShort and high >= sl
+shortTP1Hit = inShort and not tp1Hit and low <= tp1
+shortTP2Hit = inShort and tp1Hit and not tp2Hit and low <= tp2
+shortTP3Hit = inShort and tp2Hit and low <= tp3
+
+// ═══════════════════════════════════════════════════════════════
+// BITGET WEBHOOK BUILDERS
+// ═══════════════════════════════════════════════════════════════
+
+// Вземи правилния символ за Bitget
+ticker = str.replace_all(str.replace_all(syminfo.ticker, ".P", ""), "USDT", "") + "USDT"
+
+// BITGET OPEN LONG
+buildBitgetOpenLong() =>
+    sltp = useBitgetSLTP ? ',"presetStopSurplusPrice":"' + str.tostring(newLongTP1, "#.##") + '","presetStopLossPrice":"' + str.tostring(newLongSL, "#.##") + '"' : ''
+    '{"signalToken":"' + signalToken + '","symbol":"' + ticker + '","marginCoin":"' + marginCoin + '","side":"buy","orderType":"market","size":"' + str.tostring(positionSize) + '","leverage":"' + str.tostring(leverage, "#") + '","marginMode":"' + marginMode + '","tradeSide":"open"' + sltp + '}'
+
+// BITGET OPEN SHORT
+buildBitgetOpenShort() =>
+    sltp = useBitgetSLTP ? ',"presetStopSurplusPrice":"' + str.tostring(newShortTP1, "#.##") + '","presetStopLossPrice":"' + str.tostring(newShortSL, "#.##") + '"' : ''
+    '{"signalToken":"' + signalToken + '","symbol":"' + ticker + '","marginCoin":"' + marginCoin + '","side":"sell","orderType":"market","size":"' + str.tostring(positionSize) + '","leverage":"' + str.tostring(leverage, "#") + '","marginMode":"' + marginMode + '","tradeSide":"open"' + sltp + '}'
+
+// BITGET CLOSE LONG
+buildBitgetCloseLong() =>
+    '{"signalToken":"' + signalToken + '","symbol":"' + ticker + '","marginCoin":"' + marginCoin + '","side":"sell","orderType":"market","tradeSide":"close","size":"0"}'
+
+// BITGET CLOSE SHORT
+buildBitgetCloseShort() =>
+    '{"signalToken":"' + signalToken + '","symbol":"' + ticker + '","marginCoin":"' + marginCoin + '","side":"buy","orderType":"market","tradeSide":"close","size":"0"}'
+
+// ═══════════════════════════════════════════════════════════════
+// ALERTS
+// ═══════════════════════════════════════════════════════════════
+
+// OPEN LONG
+if enableWebhook and anyLong and not inLong and not inShort
+    inLong := true
+    entry := close
+    sl := newLongSL
+    tp1 := newLongTP1
+    tp2 := newLongTP2
+    tp3 := newLongTP3
+    tp1Hit := false
+    tp2Hit := false
+    alert(buildBitgetOpenLong(), alert.freq_once_per_bar)
+
+// OPEN SHORT
+if enableWebhook and anyShort and not inShort and not inLong
+    inShort := true
+    entry := close
+    sl := newShortSL
+    tp1 := newShortTP1
+    tp2 := newShortTP2
+    tp3 := newShortTP3
+    tp1Hit := false
+    tp2Hit := false
+    alert(buildBitgetOpenShort(), alert.freq_once_per_bar)
+
+// TP1 HIT - Move SL to BE
+if enableWebhook and longTP1Hit
+    tp1Hit := true
+    if useTrailingStop
+        sl := entry
+
+if enableWebhook and shortTP1Hit
+    tp1Hit := true
+    if useTrailingStop
+        sl := entry
+
+// TP2 HIT
+if enableWebhook and longTP2Hit
+    tp2Hit := true
+
+if enableWebhook and shortTP2Hit
+    tp2Hit := true
+
+// CLOSE LONG - SL
+if enableWebhook and longSLHit and inLong
+    alert(buildBitgetCloseLong(), alert.freq_once_per_bar)
+    inLong := false
+    entry := na
+    sl := na
+    tp1 := na
+    tp2 := na
+    tp3 := na
+
+// CLOSE LONG - TP3
+if enableWebhook and longTP3Hit and inLong
+    alert(buildBitgetCloseLong(), alert.freq_once_per_bar)
+    inLong := false
+    entry := na
+    sl := na
+    tp1 := na
+    tp2 := na
+    tp3 := na
+
+// CLOSE SHORT - SL
+if enableWebhook and shortSLHit and inShort
+    alert(buildBitgetCloseShort(), alert.freq_once_per_bar)
+    inShort := false
+    entry := na
+    sl := na
+    tp1 := na
+    tp2 := na
+    tp3 := na
+
+// CLOSE SHORT - TP3
+if enableWebhook and shortTP3Hit and inShort
+    alert(buildBitgetCloseShort(), alert.freq_once_per_bar)
+    inShort := false
+    entry := na
+    sl := na
+    tp1 := na
+    tp2 := na
+    tp3 := na
+
+// REVERSE LONG TO SHORT
+if enableWebhook and inLong and anyShort
+    alert(buildBitgetCloseLong(), alert.freq_once_per_bar)
+    inLong := false
+    inShort := true
+    entry := close
+    sl := newShortSL
+    tp1 := newShortTP1
+    tp2 := newShortTP2
+    tp3 := newShortTP3
+    tp1Hit := false
+    tp2Hit := false
+    alert(buildBitgetOpenShort(), alert.freq_once_per_bar)
+
+// REVERSE SHORT TO LONG
+if enableWebhook and inShort and anyLong
+    alert(buildBitgetCloseShort(), alert.freq_once_per_bar)
+    inShort := false
+    inLong := true
+    entry := close
+    sl := newLongSL
+    tp1 := newLongTP1
+    tp2 := newLongTP2
+    tp3 := newLongTP3
+    tp1Hit := false
+    tp2Hit := false
+    alert(buildBitgetOpenLong(), alert.freq_once_per_bar)
+
+// ═══════════════════════════════════════════════════════════════
+// ВИЗУАЛИЗАЦИЯ
+// ═══════════════════════════════════════════════════════════════
+plot(showEMAs ? ema9 : na, "EMA9", color.yellow)
+plot(showEMAs ? ema21 : na, "EMA21", color.orange)
+plot(showEMAs ? ema50 : na, "EMA50", color.blue, 2)
+
+plot(showSLTP and (inLong or inShort) and not na(entry) ? entry : na, "Entry", color.white, 1, plot.style_circles)
+plot(showSLTP and (inLong or inShort) and not na(sl) ? sl : na, "SL", color.red, 2, plot.style_cross)
+plot(showSLTP and (inLong or inShort) and not na(tp1) ? tp1 : na, "TP1", color.green, 1, plot.style_cross)
+plot(showSLTP and (inLong or inShort) and not na(tp2) ? tp2 : na, "TP2", color.lime, 1, plot.style_cross)
+plot(showSLTP and (inLong or inShort) and not na(tp3) ? tp3 : na, "TP3", color.aqua, 1, plot.style_cross)
+
+plotshape(strongLong, "Strong LONG", shape.labelup, location.belowbar, color.lime, size=size.normal, text="🚀")
+plotshape(strongShort, "Strong SHORT", shape.labeldown, location.abovebar, color.red, size=size.normal, text="📉")
+plotshape(normalLong and not strongLong, "LONG", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(normalShort and not strongShort, "SHORT", shape.triangledown, location.abovebar, color.maroon, size=size.small)
+
+bgcolor(inLong ? color.new(color.green, 93) : inShort ? color.new(color.red, 93) : na)
+barcolor(colorBars ? (inLong ? color.lime : inShort ? color.red : na) : na)
+
+// ═══════════════════════════════════════════════════════════════
+// ТАБЛИЦА
+// ═══════════════════════════════════════════════════════════════
+var table t = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 85))
+
+if showTable
+    pnl = inLong ? (close - entry) / entry * 100 * leverage : inShort ? (entry - close) / entry * 100 * leverage : 0.0
+    
+    table.cell(t, 0, 0, "🅱️ BITGET", text_color=color.yellow, bgcolor=color.new(#00C853, 60))
+    table.cell(t, 1, 0, ticker, text_color=color.white, bgcolor=color.new(#00C853, 60))
+    
+    table.cell(t, 0, 1, "Position", text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 1, inLong ? "LONG ▲" : inShort ? "SHORT ▼" : "FLAT", text_color=inLong ? color.lime : inShort ? color.red : color.gray, text_size=size.tiny)
+    
+    table.cell(t, 0, 2, "P/L", text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 2, (inLong or inShort) ? str.tostring(pnl, "#.##") + "%" : "-", text_color=pnl > 0 ? color.lime : color.red, text_size=size.tiny)
+    
+    table.cell(t, 0, 3, "Entry", text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 3, not na(entry) ? str.tostring(entry, "#.####") : "-", text_color=color.white, text_size=size.tiny)
+    
+    table.cell(t, 0, 4, "SL", text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 4, not na(sl) ? str.tostring(sl, "#.####") : "-", text_color=color.red, text_size=size.tiny)
+    
+    table.cell(t, 0, 5, "TP1", text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 5, not na(tp1) ? str.tostring(tp1, "#.####") : "-", text_color=color.green, text_size=size.tiny)
+    
+    table.cell(t, 0, 6, "Bull", text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 6, str.tostring(finalBull, "#.#") + " C:" + str.tostring(bullConf), text_color=finalBull >= minScore ? color.lime : color.white, text_size=size.tiny)
+    
+    table.cell(t, 0, 7, "Bear", text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 7, str.tostring(finalBear, "#.#") + " C:" + str.tostring(bearConf), text_color=finalBear >= minScore ? color.red : color.white, text_size=size.tiny)
+    
+    table.cell(t, 0, 8, "Trend", text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 8, bullTrend ? "BULL" : bearTrend ? "BEAR" : "NEUT", text_color=bullTrend ? color.lime : bearTrend ? color.red : color.yellow, text_size=size.tiny)
+    
+    table.cell(t, 0, 9, "Vol", text_color=color.gray, text_size=size.tiny)
+    table.cell(t, 1, 9, str.tostring(volumeRatio, "#.#") + "x", text_color=isHighVolume ? color.lime : color.white, text_size=size.tiny)
+    
+    signalBg = anyLong ? color.new(color.green, 40) : anyShort ? color.new(color.red, 40) : color.new(color.gray, 70)
+    table.cell(t, 0, 10, "SIGNAL", text_color=color.white, bgcolor=signalBg, text_size=size.small)
+    table.cell(t, 1, 10, strongLong ? "🚀 LONG!" : strongShort ? "📉 SHORT!" : normalLong ? "Long" : normalShort ? "Short" : "Wait", text_color=color.white, bgcolor=signalBg, text_size=size.small)
+
+// Data Window
+plot(finalBull, "Bull Score", display=display.data_window)
+plot(finalBear, "Bear Score", display=display.data_window)
+plot(inLong ? 1 : inShort ? -1 : 0, "Position", display=display.data_window)

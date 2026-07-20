@@ -1,0 +1,302 @@
+//@version=5
+strategy('Multi-Signal FULL SWING 2H [FIXED HOLD]', overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1, process_orders_on_close=true, pyramiding=0, calc_on_every_tick=false, use_bar_magnifier=false)
+
+// ====== CRITICAL FIX FOR 2H ======
+//if timeframe.period != "120"
+//    runtime.error("⚠️ USE 2H TIMEFRAME ONLY!")
+
+// ====== SIGNAL MODE SELECTION ======
+group1 = "═══════════ Signal Mode ═══════════"
+signalMode = input.string("Combined", "Signal Generation Mode", options=["Pivot Trailing", "SuperTrend AI", "Trendline Breaks", "MA Reversal", "Combined"], group=group1)
+minConfirmations = input.int(2, "Min Confirmations (Combined Mode)", minval=0, maxval=4, group=group1)
+holdMinBars = input.int(5, "Minimum Bars to Hold Position", minval=0, maxval=20, group=group1)
+
+// ====== EXIT MODE SELECTION ======
+group2 = "═══════════ Exit Strategy ═══════════"
+exitMode = input.string("Mode 1: Trailing SL/TP", "Exit Mode", options=["Mode 1: Trailing SL/TP", "Mode 2: Trailing SL then TP", "Mode 3: Opposite Signal Only"], group=group2)
+trailingSL = input.float(1.5, "Trailing Stop Loss %", minval=0.001, maxval=5.0, step=0.1, group=group2)
+trailingTP = input.float(3.0, "Trailing Take Profit %", minval=0.001, maxval=10.0, step=0.1, group=group2)
+barsBeforeTP = input.int(8, "Bars before TP activation (Mode 2)", minval=0, maxval=20, group=group2)
+exitOnOpposite = input.bool(true, "Exit on Strong Opposite Signal", group=group2)
+
+// ====== BACKTEST PERIOD ======
+group3 = "═══════════ Backtest Period ═══════════"
+useBacktest = input.bool(true, "Use Backtest Period", group=group3)
+startDate = input.time(timestamp("2024-01-01"), "Start Date", group=group3)
+endDate = input.time(timestamp("2025-01-01"), "End Date", group=group3)
+
+// ====== PIVOT TRAILING SETTINGS (FROM CODE 1) ======
+group4 = "═══════════ Pivot Trailing Settings ═══════════"
+pivotLength = input.int(24, "Pivot Length", minval=1, maxval=50, group=group4)
+
+// ====== SUPERTREND AI SETTINGS (FROM CODE 2) ======
+group5 = "═══════════ SuperTrend AI Settings ═══════════"
+atrLength = input.int(10, "ATR Length", minval=1, maxval=20, group=group5)
+minMult = input.float(1.0, "Min Multiplier", minval=0.1, maxval=3.0, step=0.1, group=group5)
+maxMult = input.float(5.0, "Max Multiplier", minval=1.0, maxval=10.0, step=0.1, group=group5)
+perfAlpha = input.float(10, "Performance Memory", minval=1, maxval=20, group=group5)
+
+// ====== TRENDLINE BREAK SETTINGS (FROM CODE 3) ======
+group6 = "═══════════ Trendline Settings ═══════════"
+swingLength = input.int(14, "Swing Detection Length", minval=1, maxval=30, group=group6)
+slopeMult = input.float(1.0, "Slope Multiplier", minval=0.1, maxval=2.0, step=0.1, group=group6)
+
+// ====== MA REVERSAL SETTINGS (FROM CODE 4) ======
+group7 = "═══════════ MA Reversal Settings ═══════════"
+maType = input.string("TEMA", "MA Type", options=["SMA", "EMA", "DEMA", "TEMA", "HullMA"], group=group7)
+maLength = input.int(50, "MA Length", minval=2, maxval=100, group=group7)
+reversalCount = input.int(20, "Previous Trend Duration", minval=1, maxval=40, group=group7)
+
+// ====== HELPER VARIABLES ======
+inBacktest = not useBacktest or (time >= startDate and time <= endDate)
+hasPosition = strategy.position_size != 0
+noPosition = strategy.position_size == 0
+isLong = strategy.position_size > 0
+isShort = strategy.position_size < 0
+
+// Prevent double signals
+var bool signalGiven = false
+var int entryBar = 0
+var float entryPrice = na
+var bool exitOrderPlaced = false
+
+if ta.change(time) != 0
+    signalGiven := false
+
+// ====== CRITICAL FIX: Track bars since entry ======
+barsSinceEntry = hasPosition ? bar_index - entryBar : 0
+canExitNow = hasPosition and barsSinceEntry >= holdMinBars
+
+// ====== 1. PIVOT TRAILING MAX/MIN (FROM CODE 1) ======
+var float trailMax = na
+var float trailMin = na
+
+pivotHighFound = ta.pivothigh(high, pivotLength, pivotLength)
+pivotLowFound = ta.pivotlow(low, pivotLength, pivotLength)
+
+if not na(pivotHighFound) or not na(pivotLowFound)
+    trailMax := high[pivotLength]
+    trailMin := low[pivotLength]
+
+trailMax := math.max(nz(high, trailMax), nz(trailMax, high))
+trailMin := math.min(nz(low, trailMin), nz(trailMin, low))
+avgTrail = math.avg(trailMax, trailMin)
+
+// Signals when price breaks trailing levels
+pivotLongSignal = not na(pivotLowFound) and close > trailMax and close[1] <= trailMax
+pivotShortSignal = not na(pivotHighFound) and close < trailMin and close[1] >= trailMin
+
+// ====== 2. SUPERTREND AI WITH OPTIMIZATION (SIMPLIFIED) ======
+atr = ta.atr(atrLength)
+optMult = (minMult + maxMult) / 2  // Simplified for 2H
+upperBand = hl2 + atr * optMult
+lowerBand = hl2 - atr * optMult
+
+var float finalUpper = na
+var float finalLower = na
+var int trend = 1
+
+finalUpper := close[1] <= finalUpper[1] or na(finalUpper[1]) ? upperBand : finalUpper[1]
+finalLower := close[1] >= finalLower[1] or na(finalLower[1]) ? lowerBand : finalLower[1]
+
+prevTrend = trend
+if close <= finalLower
+    trend := -1
+else if close >= finalUpper
+    trend := 1
+else
+    trend := trend[1]
+
+stLongSignal = trend == 1 and prevTrend == -1
+stShortSignal = trend == -1 and prevTrend == 1
+
+superTrend = trend == 1 ? finalLower : finalUpper
+
+// ====== 3. TRENDLINE BREAKS (FROM CODE 3) ======
+slope = ta.atr(swingLength) / swingLength * slopeMult
+
+var float upperTL = high
+var float lowerTL = low
+var float slopePH = 0
+var float slopePL = 0
+
+swingHigh = ta.pivothigh(high, swingLength, swingLength)
+swingLow = ta.pivotlow(low, swingLength, swingLength)
+
+if not na(swingHigh)
+    slopePH := slope
+    upperTL := swingHigh
+    
+if not na(swingLow)
+    slopePL := slope
+    lowerTL := swingLow
+
+upperTL := upperTL - slopePH
+lowerTL := lowerTL + slopePL
+
+var int upperPos = 0
+var int lowerPos = 0
+
+upperPos := not na(swingHigh) ? 0 : close > upperTL ? 1 : upperPos
+lowerPos := not na(swingLow) ? 0 : close < lowerTL ? 1 : lowerPos
+
+tlLongSignal = upperPos > upperPos[1]
+tlShortSignal = lowerPos > lowerPos[1]
+
+// ====== 4. MA REVERSAL (FROM CODE 4) ======
+ma = switch maType
+    "SMA" => ta.sma(close, maLength)
+    "EMA" => ta.ema(close, maLength)
+    "DEMA" => 2 * ta.ema(close, maLength) - ta.ema(ta.ema(close, maLength), maLength)
+    "TEMA" => 3 * ta.ema(close, maLength) - 3 * ta.ema(ta.ema(close, maLength), maLength) + ta.ema(ta.ema(ta.ema(close, maLength), maLength), maLength)
+    "HullMA" => ta.hma(close, maLength)
+    => ta.ema(close, maLength)
+
+maFalling = ta.falling(ma, reversalCount)
+maRising = ta.rising(ma, reversalCount)
+
+maLongSignal = maFalling[1] and ma > ma[1]
+maShortSignal = maRising[1] and ma < ma[1]
+
+// ====== COMBINE SIGNALS WITH STRENGTH ======
+longCount = (pivotLongSignal ? 1 : 0) + (stLongSignal ? 1 : 0) + (tlLongSignal ? 1 : 0) + (maLongSignal ? 1 : 0)
+shortCount = (pivotShortSignal ? 1 : 0) + (stShortSignal ? 1 : 0) + (tlShortSignal ? 1 : 0) + (maShortSignal ? 1 : 0)
+
+// Select signals based on mode
+longSignal = false
+shortSignal = false
+
+if signalMode == "Pivot Trailing"
+    longSignal := pivotLongSignal
+    shortSignal := pivotShortSignal
+else if signalMode == "SuperTrend AI"
+    longSignal := stLongSignal
+    shortSignal := stShortSignal
+else if signalMode == "Trendline Breaks"
+    longSignal := tlLongSignal
+    shortSignal := tlShortSignal
+else if signalMode == "MA Reversal"
+    longSignal := maLongSignal
+    shortSignal := maShortSignal
+else  // Combined
+    longSignal := longCount >= minConfirmations
+    shortSignal := shortCount >= minConfirmations
+
+// Final signals with position check
+finalLongSignal = longSignal and noPosition and not signalGiven and inBacktest
+finalShortSignal = shortSignal and noPosition and not signalGiven and inBacktest
+
+// Prevent both signals
+if finalLongSignal and finalShortSignal
+    if longCount >= shortCount
+        finalShortSignal := false
+    else
+        finalLongSignal := false
+
+// ====== ENTRY EXECUTION ======
+if finalLongSignal
+    strategy.entry("Long", strategy.long)
+    entryBar := bar_index
+    entryPrice := close
+    signalGiven := true
+    exitOrderPlaced := false  // Reset exit order flag
+    alert('{"action":"buy","contracts":"10"}', alert.freq_once_per_bar_close)
+
+if finalShortSignal
+    strategy.entry("Short", strategy.short)
+    entryBar := bar_index
+    entryPrice := close
+    signalGiven := true
+    exitOrderPlaced := false  // Reset exit order flag
+    alert('{"action":"sell","contracts":"10"}', alert.freq_once_per_bar_close)
+
+// ====== EXIT MANAGEMENT - ONLY AFTER MIN HOLD ======
+// Place exit orders ONLY when minimum bars have passed
+if canExitNow and not exitOrderPlaced
+    if isLong
+        if exitMode == "Mode 1: Trailing SL/TP"
+            strategy.exit("LongExit", "Long", trail_points=close * trailingSL/100, trail_offset=close * trailingSL/100, profit=close * trailingTP/100)
+            exitOrderPlaced := true
+        else if exitMode == "Mode 2: Trailing SL then TP"
+            if barsSinceEntry < barsBeforeTP
+                strategy.exit("LongSL", "Long", trail_points=close * trailingSL/100, trail_offset=close * trailingSL/100)
+            else
+                strategy.cancel("LongSL")
+                strategy.exit("LongTP", "Long", trail_points=close * trailingTP/100, trail_offset=close * trailingTP/100)
+            exitOrderPlaced := true
+    
+    if isShort
+        if exitMode == "Mode 1: Trailing SL/TP"
+            strategy.exit("ShortExit", "Short", trail_points=close * trailingSL/100, trail_offset=close * trailingSL/100, profit=close * trailingTP/100)
+            exitOrderPlaced := true
+        else if exitMode == "Mode 2: Trailing SL then TP"
+            if barsSinceEntry < barsBeforeTP
+                strategy.exit("ShortSL", "Short", trail_points=close * trailingSL/100, trail_offset=close * trailingSL/100)
+            else
+                strategy.cancel("ShortSL")
+                strategy.exit("ShortTP", "Short", trail_points=close * trailingTP/100, trail_offset=close * trailingTP/100)
+            exitOrderPlaced := true
+
+// ====== EXIT ON STRONG OPPOSITE - ALSO CHECK MIN HOLD ======
+if exitOnOpposite and canExitNow
+    if isLong and shortCount >= 3
+        strategy.close("Long", comment="Strong Opposite")
+        exitOrderPlaced := false
+        alert('{"action":"close"}', alert.freq_once_per_bar_close)
+    if isShort and longCount >= 3
+        strategy.close("Short", comment="Strong Opposite")
+        exitOrderPlaced := false
+        alert('{"action":"close"}', alert.freq_once_per_bar_close)
+
+// Reset exit order flag when position closes
+if noPosition and exitOrderPlaced
+    exitOrderPlaced := false
+
+// ====== VISUALIZATIONS ======
+// Trailing levels
+p1 = plot(trailMax, "Trail Max", color=color.new(color.teal, 70), linewidth=1)
+p2 = plot(trailMin, "Trail Min", color=color.new(color.red, 70), linewidth=1)
+plot(avgTrail, "Trail Avg", color=color.new(color.orange, 70), linewidth=1)
+fill(p1, p2, color=trend == 1 ? color.new(color.teal, 90) : color.new(color.red, 90))
+
+// Main indicators
+plot(superTrend, "SuperTrend", color=trend == 1 ? color.green : color.red, linewidth=2)
+plot(ma, "MA", color=color.purple, linewidth=2)
+plot(upperTL, "Upper TL", color=color.new(color.red, 50), linewidth=1, style=plot.style_line)
+plot(lowerTL, "Lower TL", color=color.new(color.green, 50), linewidth=1, style=plot.style_line)
+
+// Signals
+plotshape(finalLongSignal, "Long", location=location.belowbar, style=shape.triangleup, size=size.normal, color=color.green)
+plotshape(finalShortSignal, "Short", location=location.abovebar, style=shape.triangledown, size=size.normal, color=color.red)
+
+// Strong signal indicators
+plotshape(longCount >= 3 ? low : na, "Strong Long", location=location.belowbar, style=shape.circle, size=size.small, color=color.new(color.green, 50))
+plotshape(shortCount >= 3 ? high : na, "Strong Short", location=location.abovebar, style=shape.circle, size=size.small, color=color.new(color.red, 50))
+
+// Min hold indicator
+plotchar(hasPosition and not canExitNow ? close : na, "Holding", "●", location.top, color=color.orange, size=size.tiny)
+
+// Background
+bgcolor(not inBacktest ? color.new(color.gray, 90) : na)
+bgcolor(isLong ? color.new(color.green, 95) : isShort ? color.new(color.red, 95) : na)
+
+// Info Table
+var table infoTable = table.new(position.top_right, 2, 6)
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Signals", bgcolor=color.black, text_color=color.white)
+    table.cell(infoTable, 1, 0, "L:" + str.tostring(longCount) + " S:" + str.tostring(shortCount), bgcolor=color.gray, text_color=color.white)
+    
+    table.cell(infoTable, 0, 1, "Position", bgcolor=color.black, text_color=color.white)
+    table.cell(infoTable, 1, 1, isLong ? "LONG" : isShort ? "SHORT" : "NONE", bgcolor=isLong ? color.green : isShort ? color.red : color.gray, text_color=color.white)
+    
+    table.cell(infoTable, 0, 2, "Entry", bgcolor=color.black, text_color=color.white)
+    table.cell(infoTable, 1, 2, na(entryPrice) ? "---" : str.tostring(entryPrice, "#.##"), bgcolor=color.gray, text_color=color.white)
+    
+    table.cell(infoTable, 0, 3, "Bars Held", bgcolor=color.black, text_color=color.white)
+    table.cell(infoTable, 1, 3, hasPosition ? str.tostring(barsSinceEntry) + "/" + str.tostring(holdMinBars) : "---", bgcolor=canExitNow ? color.green : color.orange, text_color=color.white)
+    
+    table.cell(infoTable, 0, 4, "Can Exit", bgcolor=color.black, text_color=color.white)
+    table.cell(infoTable, 1, 4, canExitNow ? "YES" : "NO", bgcolor=canExitNow ? color.green : color.red, text_color=color.white)
+    
+    table.cell(infoTable, 0, 5, "Mode", bgcolor=color.black, text_color=color.white)
+    table.cell(infoTable, 1, 5, signalMode, bgcolor=color.gray, text_color=color.white)
