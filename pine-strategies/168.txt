@@ -1,0 +1,74 @@
+//@version=6
+strategy("Improved Line Break Strategy with Heikin Ashi Intrabar (Webhook Ready)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// === INPUTS ===
+// EMAs + RSI Filter
+emaShortLength = input.int(9, "Short EMA Length")
+emaLongLength = input.int(21, "Long EMA Length")
+useRSI = input.bool(true, "Use RSI Filter")
+rsiLength = input.int(14, "RSI Length")
+rsiOverbought = input.int(70, "RSI Overbought Level")
+rsiOversold = input.int(30, "RSI Oversold Level")
+
+// Stop Loss + Trailing TP
+atrMultiplier = input.float(1.5, "ATR Stop-Loss Multiplier", step=0.1)
+trailing_tp_percent = input.float(1.5, "Trailing Take-Profit %", step=0.1) / 100
+
+// Heikin Ashi Timeframe
+ha_tf = input.string("5S", "Heikin Ashi Signal Timeframe")
+
+// === BACKTESTING WINDOW ===
+FromMonth = input.int(1, "From Month")
+FromDay = input.int(1, "From Day")
+FromYear = input.int(2025, "From Year")
+ToMonth = input.int(12, "To Month")
+ToDay = input.int(31, "To Day")
+ToYear = input.int(2099, "To Year")
+
+start = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+inDateRange = time >= start and time <= finish
+
+// === HEIKIN ASHI INTRABAR SIGNALS ===
+haClose = request.security(syminfo.tickerid, ha_tf, (open + high + low + close) / 4)
+haOpen = request.security(syminfo.tickerid, ha_tf, na)
+haOpen := request.security(syminfo.tickerid, ha_tf, (open + close) / 2)
+haShortEMA = request.security(syminfo.tickerid, ha_tf, ta.ema(haClose, emaShortLength))
+haLongEMA = request.security(syminfo.tickerid, ha_tf, ta.ema(haClose, emaLongLength))
+haRSI = request.security(syminfo.tickerid, ha_tf, ta.rsi(haClose, rsiLength))
+
+// === CONDITIONS ===
+longCond = haClose > haShortEMA and haShortEMA > haLongEMA and (not useRSI or haRSI < rsiOversold)
+shortCond = haClose < haShortEMA and haShortEMA < haLongEMA and (not useRSI or haRSI > rsiOverbought)
+
+isNewLong = longCond and not longCond[1]
+isNewShort = shortCond and not shortCond[1]
+
+// === RISK MANAGEMENT ===
+atr = ta.atr(14)
+atrSL = atr * atrMultiplier
+
+// === STRATEGY EXECUTION ===
+if inDateRange
+    // Long
+    if isNewLong and strategy.position_size <= 0
+        strategy.close("Short")
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Long Exit", from_entry="Long",trail_offset=trailing_tp_percent * close,stop=close - atrSL)
+
+    // Short
+    if isNewShort and strategy.position_size >= 0
+        strategy.close("Long")
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Short Exit", from_entry="Short",trail_offset=trailing_tp_percent * close,stop=close + atrSL)
+
+// === ALERTS FOR WEBHOOK ===
+alertcondition(isNewLong, title="Long Entry Alert", message="Buy Alert: Heikin Ashi EMA Strategy Triggered")
+alertcondition(isNewShort, title="Short Entry Alert", message="Sell Alert: Heikin Ashi EMA Strategy Triggered")
+
+// === VISUAL DEBUGGING ===
+plotshape(isNewLong, title="Buy Signal", location=location.belowbar, style=shape.labelup, color=color.green, text="BUY")
+plotshape(isNewShort, title="Sell Signal", location=location.abovebar, style=shape.labeldown, color=color.red, text="SELL")
+
+plot(ta.ema(close, emaShortLength), title="Short EMA", color=color.green)
+plot(ta.ema(close, emaLongLength), title="Long EMA", color=color.red)

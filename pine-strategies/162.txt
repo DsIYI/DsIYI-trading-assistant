@@ -1,0 +1,74 @@
+//@version=6
+strategy("Heikin Ashi Strategy (Simulated)", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_every_tick=true)
+
+// === INPUTS === //
+// Backtest Date Range
+fromYear     = input.int(2023, "From Year", minval=2020)
+fromMonth    = input.int(1, "From Month", minval=1, maxval=12)
+fromDay      = input.int(1, "From Day", minval=1, maxval=31)
+toYear       = input.int(9999, "To Year", minval=2020)
+toMonth      = input.int(12, "To Month", minval=1, maxval=12)
+toDay        = input.int(31, "To Day", minval=1, maxval=31)
+
+// Supertrend Settings
+atrPeriod    = input.int(10, "ATR Period")
+factor       = input.float(3.0, "Factor", step=0.1)
+stopLossPerc = input.float(2.0, "Stop-Loss %", minval=0.001, step=0.001)
+intrabar_tf  = input.timeframe("5S", "Intrabar TF for Exit")
+
+// === DATE FILTER === //
+startDate = timestamp(fromYear, fromMonth, fromDay, 00, 00)
+endDate   = timestamp(toYear, toMonth, toDay, 23, 59)
+inDateRange = (time >= startDate and time <= endDate)
+
+// === HEIKIN ASHI SIMULATION === //
+var float haOpen = na
+haClose = (open + high + low + close) / 4
+haOpen := na(haOpen[1]) ? (open + close) / 2 : (haOpen[1] + haClose[1]) / 2
+haHigh = math.max(high, math.max(haOpen, haClose))
+haLow = math.min(low, math.min(haOpen, haClose))
+
+// === SUPER TREND CALCULATION === //
+at = ta.atr(atrPeriod)
+upperBand = (haHigh + haLow) / 2 + factor * at
+lowerBand = (haHigh + haLow) / 2 - factor * at
+
+var bool inUpTrend = true
+inUpTrend := haClose > upperBand ? true : haClose < lowerBand ? false : inUpTrend[1]
+
+// === SIGNAL === //
+trend = inUpTrend ? 1 : -1
+longCond  = trend == 1 and inDateRange
+shortCond = trend == -1 and inDateRange
+
+// === EXIT BASED ON INTRABAR REVERSAL === //
+intrabarTrend = request.security(syminfo.tickerid, intrabar_tf, trend)
+exitLongCond  = strategy.position_size > 0 and intrabarTrend == -1
+exitShortCond = strategy.position_size < 0 and intrabarTrend == 1
+
+// === STRATEGY ORDERS === //
+if (longCond and strategy.position_size <= 0)
+    strategy.entry("Buy Long", strategy.long)
+if (shortCond and strategy.position_size >= 0)
+    strategy.entry("Buy Short", strategy.short)
+
+if (exitLongCond)
+    strategy.close("Buy Long", comment="Sell Long")
+if (exitShortCond)
+    strategy.close("Buy Short", comment="Sell Short")
+
+// === STOP LOSS LOGIC === //
+stopLossPrice = strategy.position_size > 0 ? close * (1 - stopLossPerc / 100) : strategy.position_size < 0 ? close * (1 + stopLossPerc / 100) : na
+strategy.exit("SL Long", from_entry="Buy Long", stop=stopLossPrice)
+strategy.exit("SL Short", from_entry="Buy Short", stop=stopLossPrice)
+
+// === PLOTTING === //
+bgcolor(trend == 1 ? color.new(color.green, 85) : trend == -1 ? color.new(color.red, 85) : na)
+
+// === WEBHOOK MESSAGE TEMPLATE === //
+// {
+//   "symbol": "{{ticker}}",
+//   "side": "{{strategy.order.comment}}",
+//   "price": "{{close}}",
+//   "stopLoss": "{{close*(1-strategy.position_size>0?stopLossPerc/100:0)}}"
+// }

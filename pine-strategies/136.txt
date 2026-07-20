@@ -1,0 +1,166 @@
+//@version=5
+strategy("Divergence Based Trading Strategy with Full Indicator Capabilities", overlay=true, max_bars_back=9000)
+
+// Input declarations
+ph_delay = input.int(defval=2, title='Delay for Pivot High (in bars)', minval=1)
+pl_delay = input.int(defval=2, title='Delay for Pivot Low (in bars)', minval=1)
+
+// Define your inputs
+FromMonth = input.int(defval=4, title='From Month', minval=1, maxval=12)
+FromDay = input.int(defval=8, title='From Day', minval=1, maxval=31)
+FromYear = input.int(defval=2024, title='From Year', minval=999)
+ToMonth = input.int(defval=1, title='To Month', minval=1, maxval=12)
+ToDay = input.int(defval=1, title='To Day', minval=1, maxval=31)
+ToYear = input.int(defval=9999, title='To Year', minval=999)
+start = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+window() =>
+    time >= start and time <= finish ? true : false
+
+// Check time window
+if (time >= start and time <= finish)
+    // Check for pivot highs and pivot lows within the specified delay
+    float ph = ta.pivothigh(close, 10, 10)
+    float pl = ta.pivotlow(close, 10, 10)
+    if ph and (bar_index - ta.valuewhen(ph, bar_index, 0) >= ph_delay)
+        strategy.entry("Sell", strategy.short, comment="Sell based on pivot high delay")
+
+    if pl and (bar_index - ta.valuewhen(pl, bar_index, 0) >= pl_delay)
+        strategy.entry("Buy", strategy.long, comment="Buy based on pivot low delay")
+
+// Declaration of divergence detection variables, initialized here to ensure they are recognized when used
+var bool pos_reg_div_detected = false
+var bool neg_reg_div_detected = false
+var bool pos_hid_div_detected = false
+var bool neg_hid_div_detected = false
+
+// Inputs for configuring the behavior of the strategy
+prd = input.int(1, title='Pivot Period', minval=1, maxval=50)
+source = input.string('Close', title='Source for Pivot Points', options=['Close', 'High/Low'])
+searchdiv = input.string('Regular/Hidden', title='Divergence Type', options=['Regular', 'Hidden', 'Regular/Hidden'])
+showindis = input.string('Don\'t Show', title='Show Indicator Names', options=['Full', 'First Letter', 'Don\'t Show'])
+showlimit = input.int(1, title='Minimum Number of Divergence', minval=1, maxval=11)
+maxpp = input.int(20, title='Maximum Pivot Points to Check', minval=1, maxval=20)
+maxbars = input.int(100, title='Maximum Bars to Check', minval=30, maxval=200)
+shownum = input(true, title='Show Divergence Number')
+showlast = input(false, title='Show Only Last Divergence')
+dontconfirm = input(false, title='Don\'t Wait for Confirmation')
+showlines = input(false, title='Show Divergence Lines')
+showpivot = input(true, title='Show Pivot Points')
+stopLossPercentBuy = input.float(1.0, title="Stop-Loss for Buy (%)", minval=0.1, maxval=10.0)
+stopLossPercentSell = input.float(1.0, title="Stop-Loss for Sell (%)", minval=0.1, maxval=10.0)
+
+// More configuration for visuals and additional indicator settings
+calcmacd = input(true, title='MACD')
+calcmacda = input(true, title='MACD Histogram')
+calcrsi = input(true, title='RSI')
+calcstoc = input(true, title='Stochastic')
+calccci = input(true, title='CCI')
+calcmom = input(true, title='Momentum')
+calcobv = input(true, title='OBV')
+calcvwmacd = input(true, title='VWmacd')
+calccmf = input(true, title='Chaikin Money Flow')
+calcmfi = input(true, title='Money Flow Index')
+calcext = input(true, title='Check External Indicator')
+externalindi = input(close, title='External Indicator')
+pos_reg_div_col = input(color.yellow, title='Positive Regular Divergence')
+neg_reg_div_col = input(color.navy, title='Negative Regular Divergence')
+pos_hid_div_col = input(color.lime, title='Positive Hidden Divergence')
+neg_hid_div_col = input(color.red, title='Negative Hidden Divergence')
+pos_div_text_col = input(color.black, title='Positive Divergence Text Color')
+neg_div_text_col = input(color.white, title='Negative Divergence Text Color')
+reg_div_l_style_ = input.string('Solid', title='Regular Divergence Line Style', options=['Solid', 'Dashed', 'Dotted'])
+hid_div_l_style_ = input.string('Dashed', title='Hidden Divergence Line Style', options=['Solid', 'Dashed', 'Dotted'])
+reg_div_l_width = input.int(2, title='Regular Divergence Line Width', minval=1, maxval=5)
+hid_div_l_width = input.int(1, title='Hidden Divergence Line Width', minval=1, maxval=5)
+showmas = input.bool(false, title='Show MAs 50 & 200', inline='ma12')
+cma1col = input.color(color.lime, title='', inline='ma12')
+cma2col = input.color(color.red, title='', inline='ma12')
+
+// Plotting MAs based on user input
+plot(showmas ? ta.sma(close, 50) : na, color=showmas ? cma1col : na)
+plot(showmas ? ta.sma(close, 200) : na, color=showmas ? cma2col : na)
+
+// Define line styles based on settings
+var reg_div_l_style = reg_div_l_style_ == 'Solid' ? line.style_solid : reg_div_l_style_ == 'Dashed' ? line.style_dashed : line.style_dotted
+var hid_div_l_style = hid_div_l_style_ == 'Solid' ? line.style_solid : hid_div_l_style_ == 'Dashed' ? line.style_dashed : line.style_dotted
+
+// Calculation of various indicators
+rsi = ta.rsi(close, 14)  // RSI
+[macd, signal, deltamacd] = ta.macd(close, 12, 26, 9)  // MACD
+moment = ta.mom(close, 10)  // Momentum
+cci = ta.cci(close, 10)  // CCI
+Obv = ta.obv  // OBV
+stk = ta.sma(ta.stoch(close, high, low, 14), 3)  // Stoch
+maFast = ta.vwma(close, 12)  // Volume Weighted MACD
+maSlow = ta.vwma(close, 26)
+vwmacd = maFast - maSlow
+Cmfm = (close - low - (high - close)) / (high - low)  // Chaikin Money Flow
+Cmfv = Cmfm * volume
+cmf = ta.sma(Cmfv, 21) / ta.sma(volume, 21)
+Mfi = ta.mfi(close, 14)  // Money Flow Index
+
+// Store and manage indicator names and colors for visualization
+var indicators_name = array.new_string(11)
+var div_colors = array.new_color(4)
+if barstate.isfirst
+    // Set indicator names based on user preference for full names or initials
+    array.set(indicators_name, 0, showindis == 'Full' ? 'MACD' : 'M')
+    array.set(indicators_name, 1, showindis == 'Full' ? 'Histogram' : 'H')
+    array.set(indicators_name, 2, showindis == 'Full' ? 'RSI' : 'R')
+    array.set(indicators_name, 3, showindis == 'Full' ? 'Stochastic' : 'S')
+    array.set(indicators_name, 4, showindis == 'Full' ? 'CCI' : 'C')
+    array.set(indicators_name, 5, showindis == 'Full' ? 'Momentum' : 'M')
+    array.set(indicators_name, 6, showindis == 'Full' ? 'OBV' : 'O')
+    array.set(indicators_name, 7, showindis == 'Full' ? 'Volume Weighted MACD' : 'V')
+    array.set(indicators_name, 8, showindis == 'Full' ? 'Chaikin Money Flow' : 'C')
+    array.set(indicators_name, 9, showindis == 'Full' ? 'Money Flow Index' : 'M')
+    array.set(indicators_name, 10, showindis == 'Full' ? 'External' : 'E')
+    // Set divergence colors
+    array.set(div_colors, 0, pos_reg_div_col)
+    array.set(div_colors, 1, neg_reg_div_col)
+    array.set(div_colors, 2, pos_hid_div_col)
+    array.set(div_colors, 3, neg_hid_div_col)
+
+// Detect new pivot highs and lows
+float ph = ta.pivothigh(source == 'Close' ? close : high, prd, prd)
+float pl = ta.pivotlow(source == 'Close' ? close : low, prd, prd)
+// Conditional plotting of pivot points
+plotshape(ph and showpivot ? ph : na, location=location.abovebar, color=color.red, style=shape.triangledown, text="PH", title="Pivot High")
+plotshape(pl and showpivot ? pl : na, location=location.belowbar, color=color.green, style=shape.triangleup, text="PL", title="Pivot Low")
+
+// Manage history of pivot points for trading logic
+var int lastPHIndex = na
+var int lastPLIndex = na
+
+// Update last known indices of pivot points
+if ph
+    lastPHIndex := bar_index
+if pl
+    lastPLIndex := bar_index
+
+// Define conditions for trading based on pivot points with a specified delay
+bool sellCondition = lastPHIndex != na and (bar_index - lastPHIndex >= ph_delay)
+bool buyCondition = lastPLIndex != na and (bar_index - lastPLIndex >= pl_delay)
+
+// Execute trading actions based on conditions
+if buyCondition
+    strategy.close_all(comment="Close All on Buy Signal")
+    strategy.entry("Buy", strategy.long, comment="Buy Entry")
+if sellCondition
+    strategy.close_all(comment="Close All on Sell Signal")
+    strategy.entry("Sell", strategy.short, comment="Sell Entry")
+
+// Optional: Highlight the chart background to visually indicate trading signals
+bgcolor(buyCondition ? color.new(color.green, 90) : na)
+bgcolor(sellCondition ? color.new(color.red, 90) : na)
+
+// Alert conditions
+alertcondition(pos_reg_div_detected, title='Positive Regular Divergence Detected', message='Positive Regular Divergence Detected')
+alertcondition(neg_reg_div_detected, title='Negative Regular Divergence Detected', message='Negative Regular Divergence Detected')
+alertcondition(pos_hid_div_detected, title='Positive Hidden Divergence Detected', message='Positive Hidden Divergence Detected')
+alertcondition(neg_hid_div_detected, title='Negative Hidden Divergence Detected', message='Negative Hidden Divergence Detected')
+
+// Comprehensive alert for any detected divergence
+alertcondition(pos_reg_div_detected or pos_hid_div_detected, title='Positive Divergence Detected', message='Positive Divergence Detected')
+alertcondition(neg_reg_div_detected or neg_hid_div_detected, title='Negative Divergence Detected', message='Negative Divergence Detected')

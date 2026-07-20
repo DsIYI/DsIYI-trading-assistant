@@ -1,0 +1,195 @@
+//@version=6
+strategy(title='Wave-Picking Strategy (WaveTrend + Pivot) w/ Non-Reversal, Cooldown, & TP Methods',overlay=true,default_qty_type=strategy.percent_of_equity,default_qty_value=15,max_bars_back=4999)
+
+//──────────────────────────────────────────────────────────
+// 1) INPUTS & SETTINGS
+//──────────────────────────────────────────────────────────
+
+// Group: Timing
+FromMonth = input.int(defval=7, title='From Month', minval=1, maxval=12, group='Timing')
+FromDay   = input.int(defval=5, title='From Day',   minval=1, maxval=31, group='Timing')
+FromYear  = input.int(defval=2024, title='From Year', minval=2020, group='Timing')
+ToMonth   = input.int(defval=1, title='To Month', minval=1, maxval=12, group='Timing')
+ToDay     = input.int(defval=1, title='To Day',   minval=1, maxval=31, group='Timing')
+ToYear    = input.int(defval=9999, title='To Year', minval=2020, group='Timing')
+start     = timestamp(FromYear,FromMonth,FromDay,0,0)
+finish    = timestamp(ToYear,ToMonth,ToDay,23,59)
+window()  => time>=start and time<=finish
+
+// Group: WaveTrend settings
+useWaveTrend = input.bool(defval=true,  title='Use WaveTrend?', group='WaveTrend Settings')
+wtChannelLen = input.int(defval=9,      title='WT Channel Length', group='WaveTrend Settings')
+wtAvgLen     = input.int(defval=12,     title='WT Average Length', group='WaveTrend Settings')
+// Overbought/Oversold levels
+wtOS         = input.float(defval=-60,  title='WT Oversold Level', group='WaveTrend Settings')
+wtOB         = input.float(defval=60,   title='WT Overbought Level', group='WaveTrend Settings')
+
+// Group: Pivot Points
+usePivot     = input.bool(defval=true, title='Use Pivot Confirmation?', group='Pivot Settings')
+pivotLen     = input.int(defval=2,     title='Pivot LookBack', minval=1, maxval=10, group='Pivot Settings')
+
+// Group: Cooldown
+minBarsBetweenTrades = input.int(defval=10, title='Min Bars Between Trades', minval=1, group='Cooldown')
+
+// Group: Stop-Loss & Trailing Stop
+stopLossPercent = input.float(defval=2.0, title='Stop-Loss (%)', minval=0.1, maxval=10.0, step=0.1, group='Stop-Loss & Trailing Stop')
+trailingStop    = input.float(defval=2.5, title='Trailing Stop (%)', step=0.1, group='Stop-Loss & Trailing Stop')
+
+// Group: Maker Order Settings
+limitOffsetPercent = input.float(defval=0.2, title='Limit Offset (%) for Maker Orders', minval=0.0, step=0.01, tooltip='Place the entry limit order this % away from current price for Maker.', group='Order Placement')
+
+// Group: Trade Direction
+tradeDirection = input.string(defval='Both', title='Trade Direction Allowed', options=['Buy','Sell','Both'], group='Trade Mode')
+
+//──────────────────────────────────────────────────────────
+// 2) TAKE-PROFIT METHOD: SELECTOR & INPUTS
+//──────────────────────────────────────────────────────────
+takeProfitMethod = input.string(defval='PercentProfit',title='Take Profit Method',options=['PercentProfit','TrendLevel','MultiTimeFrameTrend'],tooltip='Choose how to exit (close) your position.')
+
+// For PercentProfit
+tpPercent = input.float(defval=5.0, title='Take Profit % (if PercentProfit selected)', minval=0.5, maxval=100.0, group='TakeProfit Percent')
+
+// For TrendLevel (PSAR)
+psarAF    = input.float(defval=0.02, title='PSAR Acceleration Factor', step=0.01, group='TakeProfit TrendLevel')
+psarMaxAF = input.float(defval=0.2,  title='PSAR Max AF', step=0.01, group='TakeProfit TrendLevel')
+
+// For MultiTimeFrameTrend
+higherTF  = input.timeframe(defval='240',  title='Higher TimeFrame for Trend', group='TakeProfit MultiTF')
+htfEmaLen = input.int(defval=50,           title='EMA length for Higher TF',   minval=1, maxval=200, group='TakeProfit MultiTF')
+
+//──────────────────────────────────────────────────────────
+// 3) WAVETREND + PIVOT CALCULATIONS
+//──────────────────────────────────────────────────────────
+
+// WaveTrend Calculation (simplified version)
+esa = ta.ema(close, wtChannelLen)
+de  = ta.ema(math.abs(close - esa), wtChannelLen)
+ci  = (close - esa) / (0.015 * de)
+tci = ta.ema(ci, wtAvgLen)
+wt1 = tci
+// Optional: You can also compute a second line (wt2 = ta.ema(wt1, 3)) 
+// but we'll keep a single line for clarity
+
+// Overbought/oversold detection
+waveTrendOverSold = (wt1 < wtOS)
+waveTrendOverBought = (wt1 > wtOB)
+
+// Pivot Confirmation
+pivotHigh = ta.pivothigh(high, pivotLen, pivotLen)
+pivotLow  = ta.pivotlow(low,  pivotLen, pivotLen)
+
+localLowConfirmed  = usePivot ? (not na(pivotLow))  : true
+localHighConfirmed = usePivot ? (not na(pivotHigh)) : true
+
+//──────────────────────────────────────────────────────────
+// 4) ENTRY SIGNALS: "Wave picking"
+//    - Long: WT crosses below oversold, then crosses back above. Also pivotLow confirms
+//    - Short: WT crosses above overbought, then crosses back below. Also pivotHigh confirms
+//──────────────────────────────────────────────────────────
+var float wtPrev = na
+wtCrossUp   = false
+wtCrossDown = false
+
+if barstate.isconfirmed
+    wtCrossUp   := (wtPrev < wtOS)  and (wt1 > wtOS)
+    wtCrossDown := (wtPrev > wtOB)  and (wt1 < wtOB)
+    wtPrev := wt1
+
+// Final Long/Short signals
+longConditionWave = useWaveTrend ? wtCrossUp and localLowConfirmed and window() : false
+shortConditionWave= useWaveTrend ? wtCrossDown and localHighConfirmed and window() : false
+
+//──────────────────────────────────────────────────────────
+// 5) STOP-LOSS & TRAILING STOP CALC
+//──────────────────────────────────────────────────────────
+longStopLoss  = close * (1 - stopLossPercent / 100)
+shortStopLoss = close * (1 + stopLossPercent / 100)
+
+limitBuyPrice   = close * (1 - limitOffsetPercent / 100)
+limitShortPrice = close * (1 + limitOffsetPercent / 100)
+
+//──────────────────────────────────────────────────────────
+// 6) COOLDOWN: Min Bars Between Trades
+//    - Non-Reversal approach (no auto-close on opposite signal)
+//──────────────────────────────────────────────────────────
+
+var int lastTradeBar = na
+
+canTrade() =>
+    if na(lastTradeBar)
+        true
+    else
+        (bar_index - lastTradeBar) >= minBarsBetweenTrades
+
+// 6a) LONG entries
+if longConditionWave and (tradeDirection=='Buy' or tradeDirection=='Both') and canTrade()
+    strategy.cancel('Short Entry Wave')
+    strategy.entry(id='Long Entry Wave', direction=strategy.long, limit=limitBuyPrice)
+    strategy.exit('Close Long Wave','Long Entry Wave', stop=longStopLoss, trail_points=trailingStop/100*close, trail_offset=trailingStop/100*close)
+    lastTradeBar := bar_index
+
+// 6b) SHORT entries
+if shortConditionWave and (tradeDirection=='Sell' or tradeDirection=='Both') and canTrade()
+    strategy.cancel('Long Entry Wave')
+    strategy.entry(id='Short Entry Wave', direction=strategy.short, limit=limitShortPrice)
+    strategy.exit('Close Short Wave','Short Entry Wave', stop=shortStopLoss, trail_points=trailingStop/100*close, trail_offset=trailingStop/100*close)
+    lastTradeBar := bar_index
+
+//──────────────────────────────────────────────────────────
+// 7) TAKE-PROFIT LOGIC
+//──────────────────────────────────────────────────────────
+
+// Higher TF data (for MultiTimeFrameTrend)
+htfClose = request.security(syminfo.tickerid, higherTF, close)
+htfEma   = request.security(syminfo.tickerid, higherTF, ta.ema(close, htfEmaLen))
+
+// PSAR
+psarValue = ta.sar(psarAF, psarAF, psarMaxAF)
+
+var float entryPrice   = na
+var float currentPosSz = na
+if barstate.isrealtime or barstate.isnew
+    entryPrice   := strategy.position_avg_price
+    currentPosSz := strategy.position_size
+
+if currentPosSz != 0
+    bool exitCondition = false
+
+    // 1) PercentProfit
+    if takeProfitMethod=='PercentProfit'
+        if currentPosSz>0
+            exitCondition := close >= entryPrice * (1 + tpPercent/100)
+        else
+            exitCondition := close <= entryPrice * (1 - tpPercent/100)
+
+    // 2) TrendLevel (PSAR)
+    if takeProfitMethod=='TrendLevel'
+        if currentPosSz>0
+            exitCondition := close < psarValue
+        else
+            exitCondition := close > psarValue
+
+    // 3) MultiTimeFrameTrend
+    if takeProfitMethod=='MultiTimeFrameTrend'
+        if currentPosSz>0
+            exitCondition := htfClose < htfEma
+        else
+            exitCondition := htfClose > htfEma
+
+    if exitCondition
+        strategy.close_all(comment='TP exit: ' + takeProfitMethod)
+
+//──────────────────────────────────────────────────────────
+// 8) DEBUG PLOTS
+//──────────────────────────────────────────────────────────
+
+// Plot waveTrend
+plot(wt1, color=color.new(color.white, 0), title='WaveTrend')
+// Mark oversold/overbought lines
+hline(wtOS, 'WT Oversold', color=color.green)
+hline(wtOB, 'WT Overbought', color=color.red)
+
+// Mark pivot points
+plotshape(series=pivotHigh, title='PivotHigh', style=shape.labeldown, location=location.abovebar, color=color.red, size=size.tiny)
+plotshape(series=pivotLow,  title='PivotLow',  style=shape.labelup,   location=location.belowbar, color=color.green, size=size.tiny)
+

@@ -1,0 +1,197 @@
+//@version=6
+strategy("iMoku Perpetual Futures Enhanced [Crypto Short/Long Variants]", 
+         overlay=true, 
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=10,  // 10% risk per trade
+         currency=currency.USD, 
+         initial_capital=10000, 
+         commission_type=strategy.commission.percent, 
+         commission_value=0.05,  // Typical for crypto perps
+         slippage=10,  // Higher for volatility
+         process_orders_on_close=true,
+         max_bars_back=500)
+
+// === INPUTS: ICHIMOKU & MODE
+mode = input.string("Short-term", title="Trading Mode", options=["Short-term", "Medium-term"], group="Ichimoku Settings")
+conversionPeriods = mode == "Short-term" ? 5 : 9
+basePeriods = mode == "Short-term" ? 13 : 26
+laggingSpan2Periods = mode == "Short-term" ? 26 : 52
+displacement = mode == "Short-term" ? 13 : 26
+rsiPeriod = input.int(14, title="RSI Period", group="Filters")
+rsiOverbought = input.int(70, title="RSI Overbought (Short Filter)", group="Filters")
+rsiOversold = input.int(30, title="RSI Oversold (Long Filter)", group="Filters")
+
+// === INPUTS: STRATEGY VARIANTS
+direction = input.string("Both", title="Direction", options=["Long-only", "Both"], group="Strategy Selection")
+strategyType = input.string("Strong Tenkan-Kijun", title="Strategy Type", 
+     options=["Strong Tenkan-Kijun", "Neutro Tenkan-Kijun", "Light Tenkan-Kijun",
+              "Strong Price-Kijun", "Neutro Price-Kijun", "Light Price-Kijun",
+              "Kumo Breakout", "Kumo Twist",
+              "Strong Kumo-Twist Short", "Light Kumo-Twist Short",  // Short variants
+              "Kumo Breakout Short"], group="Strategy Selection")
+aggressive = input.bool(false, title="Aggressive Mode (No Confirmation, More Trades)", group="Strategy Selection")
+
+// === INPUTS: RISK & BACKTEST
+leverage = input.int(5, title="Leverage (x)", minval=1, maxval=20, group="Risk Management")
+slPercent = input.float(2.0, title="Stop Loss %", step=0.1, group="Risk Management")
+tpPercent = input.float(4.0, title="Take Profit %", step=0.1, group="Risk Management")
+useATR = input.bool(false, title="Use ATR-based SL/TP?", group="Risk Management")
+atrLength = input.int(14, title="ATR Length", group="Risk Management")
+atrMultiplierSL = input.float(1.5, title="ATR Multiplier SL", group="Risk Management")
+atrMultiplierTP = input.float(3.0, title="ATR Multiplier TP", group="Risk Management")
+
+// Backtest Range
+fromYear = input.int(2023, 'From Year', minval=1900, maxval=2100, group="Backtest Period")
+fromMonth = input.int(1, 'From Month', minval=1, maxval=12, group="Backtest Period")
+fromDay = input.int(1, 'From Day', minval=1, maxval=31, group="Backtest Period")
+toYear = input.int(2024, 'To Year', minval=1900, maxval=2100, group="Backtest Period")
+toMonth = input.int(12, 'To Month', minval=1, maxval=12, group="Backtest Period")
+toDay = input.int(31, 'To Day', minval=1, maxval=31, group="Backtest Period")
+startTime = timestamp(fromYear, fromMonth, fromDay, 0, 0)
+endTime = timestamp(toYear, toMonth, toDay, 23, 59)
+inDateRange = time >= startTime and time <= endTime
+
+// === ICHIMOKU CALCULATION
+donchian(len) => math.avg(ta.lowest(len), ta.highest(len))
+conversionLine = donchian(conversionPeriods)
+baseLine = donchian(basePeriods)
+leadLine1 = math.avg(conversionLine, baseLine)
+leadLine2 = donchian(laggingSpan2Periods)
+adj_leadLine1 = leadLine1[displacement - 1]
+adj_leadLine2 = leadLine2[displacement - 1]
+
+// Kumo conditions
+price_over_kumo = close > math.max(adj_leadLine1, adj_leadLine2)
+price_under_kumo = close < math.min(adj_leadLine1, adj_leadLine2)
+price_in_kumo = not price_over_kumo and not price_under_kumo
+
+// RSI Filter
+rsi = ta.rsi(close, rsiPeriod)
+rsiLongPass = rsi > rsiOversold
+rsiShortPass = rsi < rsiOverbought
+
+// === SIGNAL GENERATION (Variants)
+var string currentStrat = strategyType  // For switch
+
+// Tenkan-Kijun
+tkCrossUp = ta.crossover(conversionLine, baseLine)
+tkCrossDown = ta.crossunder(conversionLine, baseLine)
+strong_tk_long = tkCrossUp and price_over_kumo
+neutro_tk_long = tkCrossUp and price_in_kumo
+light_tk_long = tkCrossUp and price_under_kumo
+strong_tk_short = tkCrossDown and price_under_kumo
+neutro_tk_short = tkCrossDown and price_in_kumo
+light_tk_short = tkCrossDown and price_over_kumo
+
+// Price-Kijun
+pkCrossUp = ta.crossover(close, baseLine)
+pkCrossDown = ta.crossunder(close, baseLine)
+strong_pk_long = pkCrossUp and price_over_kumo
+neutro_pk_long = pkCrossUp and price_in_kumo
+light_pk_long = pkCrossUp and price_under_kumo
+strong_pk_short = pkCrossDown and price_under_kumo
+neutro_pk_short = pkCrossDown and price_in_kumo
+light_pk_short = pkCrossDown and price_over_kumo
+
+// Kumo Breakout
+kumoBreakUp = ta.crossover(close, math.max(adj_leadLine1, adj_leadLine2))
+kumoBreakDown = ta.crossunder(close, math.min(adj_leadLine1, adj_leadLine2))
+
+// Kumo Twist
+twistUp = ta.crossover(adj_leadLine1, adj_leadLine2)
+twistDown = ta.crossunder(adj_leadLine1, adj_leadLine2)
+strong_twist_long = twistUp and price_over_kumo
+light_twist_long = twistUp and price_under_kumo
+strong_twist_short = twistDown and price_under_kumo
+light_twist_short = twistDown and price_over_kumo
+
+// Select Signal based on Type & Direction
+longSignal = switch currentStrat
+    "Strong Tenkan-Kijun" => strong_tk_long
+    "Neutro Tenkan-Kijun" => neutro_tk_long
+    "Light Tenkan-Kijun" => light_tk_long
+    "Strong Price-Kijun" => strong_pk_long
+    "Neutro Price-Kijun" => neutro_pk_long
+    "Light Price-Kijun" => light_pk_long
+    "Kumo Breakout" => kumoBreakUp
+    "Kumo Twist" => strong_twist_long  // Default strong for twist
+    => false
+
+shortSignal = switch currentStrat
+    "Strong Tenkan-Kijun" => strong_tk_short
+    "Neutro Tenkan-Kijun" => neutro_tk_short
+    "Light Tenkan-Kijun" => light_tk_short
+    "Strong Price-Kijun" => strong_pk_short
+    "Neutro Price-Kijun" => neutro_pk_short
+    "Light Price-Kijun" => light_pk_short
+    "Kumo Breakout Short" => kumoBreakDown
+    "Strong Kumo-Twist Short" => strong_twist_short
+    "Light Kumo-Twist Short" => light_twist_short
+    => false  // Only if "Both" or short-specific
+
+// Confirmation (for non-aggressive)
+confirmedLong = aggressive or barstate.isconfirmed ? longSignal and rsiLongPass : false
+confirmedShort = aggressive or barstate.isconfirmed ? shortSignal and rsiShortPass : false
+
+// === POSITION & RISK
+atr = ta.atr(atrLength)
+slDistance = useATR ? atr * atrMultiplierSL : close * slPercent / 100
+tpDistance = useATR ? atr * atrMultiplierTP : close * tpPercent / 100
+
+var float entryPrice = na
+var float slPrice = na
+var float tpPrice = na
+
+if (confirmedLong and inDateRange and direction != "Short-only" and strategy.position_size == 0)
+    entryPrice := close
+    slPrice := entryPrice - slDistance
+    tpPrice := entryPrice + tpDistance
+    qty = (strategy.equity * 0.1 * leverage) / entryPrice  // Dynamic with leverage
+    strategy.entry("Long", strategy.long, qty=qty)
+    strategy.exit("Long Exit", "Long", stop=slPrice, limit=tpPrice)
+    alert('LONG ENTRY: ' + syminfo.ticker + ' @ ' + str.tostring(entryPrice), alert.freq_once_per_bar)
+
+if (confirmedShort and inDateRange and direction == "Both" and strategy.position_size == 0)
+    entryPrice := close
+    slPrice := entryPrice + slDistance
+    tpPrice := entryPrice - tpDistance
+    qty = (strategy.equity * 0.1 * leverage) / entryPrice
+    strategy.entry("Short", strategy.short, qty=qty)
+    strategy.exit("Short Exit", "Short", stop=slPrice, limit=tpPrice)
+    alert('SHORT ENTRY: ' + syminfo.ticker + ' @ ' + str.tostring(entryPrice), alert.freq_once_per_bar)
+
+// Exit on reverse (for cross-based)
+if (strategy.position_size > 0 and (ta.crossunder(conversionLine, baseLine) or kumoBreakDown))  // Adapt per strat
+    strategy.close("Long")
+    alert('LONG EXIT: ' + syminfo.ticker + ' @ ' + str.tostring(close), alert.freq_once_per_bar)
+
+if (strategy.position_size < 0 and (ta.crossover(conversionLine, baseLine) or kumoBreakUp))
+    strategy.close("Short")
+    alert('SHORT EXIT: ' + syminfo.ticker + ' @ ' + str.tostring(close), alert.freq_once_per_bar)
+
+// === PLOTS
+plot(conversionLine, color=color.aqua, title="Tenkan Sen", linewidth=1)
+plot(baseLine, color=color.purple, title="Kijun Sen", linewidth=1)
+plot(close, offset=-displacement, color=color.gray, title="Chikou Span")  // Fixed offset
+p1 = plot(leadLine1, offset=displacement-1, color=color.blue, title="Senkou A")
+p2 = plot(leadLine2, offset=displacement-1, color=color.red, title="Senkou B")
+fill(p1, p2, color=leadLine1 > leadLine2 ? color.new(color.green, 80) : color.new(color.red, 80), title="Kumo")  // Fixed colors
+
+plotshape(confirmedLong, title="BUY", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(confirmedShort, title="SELL", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")
+
+// SL/TP Lines
+plot(strategy.position_size > 0 ? slPrice : na, color=color.red, title="SL Long", style=plot.style_linebr)
+plot(strategy.position_size > 0 ? tpPrice : na, color=color.green, title="TP Long", style=plot.style_linebr)
+plot(strategy.position_size < 0 ? slPrice : na, color=color.red, title="SL Short", style=plot.style_linebr)
+plot(strategy.position_size < 0 ? tpPrice : na, color=color.green, title="TP Short", style=plot.style_linebr)
+
+// === TABLE FOR DEBUG (Optional)
+if barstate.islast
+    var table infoTable = table.new(position.top_right, 2, 3, bgcolor=color.white, border_width=1)
+    table.cell(infoTable, 0, 0, "Mode", text_color=color.black)
+    table.cell(infoTable, 1, 0, mode, text_color=color.black)
+    table.cell(infoTable, 0, 1, "Strategy", text_color=color.black)
+    table.cell(infoTable, 1, 1, strategyType, text_color=color.black)
+    table.cell(infoTable, 0, 2, "RSI", text_color=color.black)
+    table.cell(infoTable, 1, 2, str.tostring(rsi, "#.##"), text_color=color.black)

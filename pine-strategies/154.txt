@@ -1,0 +1,58 @@
+//@version=5
+strategy("Pivot Points High Low & Missed Reversal Levels Strategy", overlay=true, max_labels_count=500, max_lines_count=500, calc_on_every_tick=true)
+
+// Input for Pivot Length
+length = input(50, "Pivot Length")
+
+// Input for displaying regular and missed pivots
+show_reg = input.bool(true, "Regular Pivots", inline="inline1")
+reg_ph_css = input.color(#ef5350, "High", inline="inline1")
+reg_pl_css = input.color(#26a69a, "Low", inline="inline1")
+
+show_miss = input.bool(true, "Missed Pivots", inline="inline2")
+miss_ph_css = input.color(#ef5350, "High", inline="inline2")
+miss_pl_css = input.color(#26a69a, "Low", inline="inline2")
+
+// Input for label color
+label_css = input.color(color.white, "Text Label Color")
+
+// Calculate Pivot Points
+ph = ta.pivothigh(length, length)
+pl = ta.pivotlow(length, length)
+
+// Trailing inputs
+tp_trailing_value = input.float(defval=0.5, title="Trailing Take-Profit (%)", step=0.1) / 100
+sl_trailing_value = input.float(defval=1.0, title="Trailing Stop-Loss (%)", step=0.1) / 100
+
+// Define strategy conditions and execute
+if not na(ph) and show_reg
+    label.new(bar_index - length, high, "▼", textcolor=label_css, color=reg_ph_css, style=label.style_label_down, size=size.small, tooltip=str.tostring(ph, "#.####"))
+    strategy.entry("Short", strategy.short, comment="Pivot High")
+    strategy.exit(id="Short TP/SL", from_entry="Short", limit=na, stop=strategy.position_avg_price * (1 + sl_trailing_value))
+
+if not na(pl) and show_reg
+    label.new(bar_index - length, low, "▲", textcolor=label_css, color=reg_pl_css, style=label.style_label_up, size=size.small, tooltip=str.tostring(pl, "#.####"))
+    strategy.entry("Long", strategy.long, comment="Pivot Low")
+    strategy.exit(id="Long TP/SL", from_entry="Long", limit=na, stop=strategy.position_avg_price * (1 - sl_trailing_value))
+
+if not na(ph) and show_miss and ph < high
+    label.new(bar_index - length, high, "👻", color=miss_ph_css, style=label.style_label_down, size=size.small, tooltip=str.tostring(ph, "#.####"))
+    strategy.entry("Short", strategy.short, comment="Missed Pivot High")
+    strategy.exit(id="Short TP/SL", from_entry="Short", limit=na, stop=strategy.position_avg_price * (1 + sl_trailing_value))
+
+if not na(pl) and show_miss and pl > low
+    label.new(bar_index - length, low, "👻", color=miss_pl_css, style=label.style_label_up, size=size.small, tooltip=str.tostring(pl, "#.####"))
+    strategy.entry("Long", strategy.long, comment="Missed Pivot Low")
+    strategy.exit(id="Long TP/SL", from_entry="Long", limit=na, stop=strategy.position_avg_price * (1 - sl_trailing_value))
+
+// Additional exit conditions (Take-Profit) for trailing mechanism:
+if strategy.opentrades > 0
+    entry_price = strategy.opentrades.entry_price(0)
+    if strategy.position_size > 0 // Long position
+        tp_price = entry_price * (1 + tp_trailing_value)
+        stop_price = entry_price * (1 - sl_trailing_value)
+        strategy.exit(id="Long TP", from_entry="Long", limit=tp_price)
+    else if strategy.position_size < 0 // Short position
+        tp_price = entry_price * (1 - tp_trailing_value)
+        stop_price = entry_price * (1 + sl_trailing_value)
+        strategy.exit(id="Short TP", from_entry="Short", limit=tp_price)

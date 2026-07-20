@@ -1,0 +1,101 @@
+//@version=5
+strategy("Derivatives Perpetual Future Trading Strategy", overlay=true, shorttitle="DPFTS", default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// Timing settings
+FromMonth = input.int(defval=5, title='From Month', minval=1, maxval=12)
+FromDay = input.int(defval=25, title='From Day', minval=1, maxval=31)
+FromYear = input.int(defval=2024, title='From Year', minval=2024)
+ToMonth = input.int(defval=1, title='To Month', minval=1, maxval=12)
+ToDay = input.int(defval=1, title='To Day', minval=1, maxval=31)
+ToYear = input.int(defval=9999, title='To Year', minval=2024)
+start = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+window() => time >= start and time <= finish
+
+// Input Variables for Stop Loss
+stop_loss = input.float(2, title="Stop Loss (%)", minval=0.1, step=0.1)
+
+// SlhTgh MACD ADX Indicator Code
+fast_length = input.int(title="Fast Length", defval=12)
+slow_length = input.int(title="Slow Length", defval=26)
+src = input.source(title="Source", defval=close)
+signal_length = input.int(title="Signal Smoothing", minval = 1, maxval = 50, defval = 9)
+adxlen = input.int(14, title="ADX Smoothing")
+dilen = input.int(14, title="DI Length")
+dirmov(len) =>
+    up = ta.change(high)
+    down = -ta.change(low)
+    plusDM = na(up) ? na : (up > down and up > 0 ? up : 0)
+    minusDM = na(down) ? na : (down > up and down > 0 ? down : 0)
+    truerange = ta.rma(ta.tr, len)
+    plus = fixnan(100 * ta.rma(plusDM, len) / truerange)
+    minus = fixnan(100 * ta.rma(minusDM, len) / truerange)
+    [plus, minus]
+adx(dilen, adxlen) =>
+    [plus, minus] = dirmov(dilen)
+    sum = plus + minus
+    adx = 100 * ta.rma(math.abs(plus - minus) / (sum == 0 ? 1 : sum), adxlen)
+sig = adx(dilen, adxlen)
+
+fast_ma = ta.ema(src, fast_length)
+slow_ma = ta.ema(src, slow_length)
+macd = fast_ma - slow_ma
+signal = ta.ema(macd, signal_length)
+hist = macd - signal
+
+macd_crossup = macd < 0 and ta.crossover(macd, signal)
+macd_crossdown = macd > 0 and ta.crossunder(macd, signal)
+bullish = sig > 25 and macd_crossup
+bearish = sig > 25 and macd_crossdown
+
+plotshape(series=bullish, title="buy", text="Buy", color=color.green, style=shape.labelup, location=location.belowbar, size=size.small, textcolor=color.white)
+plotshape(series=bearish, title="sell", text="Sell", color=color.red, style=shape.labeldown, location=location.abovebar, size=size.small, textcolor=color.white)
+
+// RSITrend Indicator Code
+[plus, minus, adx] = ta.dmi(14, 14)
+show_Baseline = input.bool(true, title='Show Hull Trend')
+rsiLengthInput = input.int(14, minval=1, title="RSI Length1")
+rsiLengthInput2 = input.int(28, minval=1, title="RSI Length2")
+trendlen = input.int(title='Hull Trend Length', defval=30)
+oversold = input.int(30, minval=1, title="Over Sold")
+overbought = input.int(70, minval=1, title="Over Bought")
+BBMC = ta.hma(close, trendlen)
+MHULL = BBMC[0]
+SHULL = BBMC[2]
+hmac = MHULL > SHULL ? color.new(#00c3ff, 0) : color.new(#ff0062, 0)
+buysignal = MHULL > SHULL 
+sellsignal = MHULL < SHULL
+frsi = ta.hma(ta.rsi(close, rsiLengthInput), 10)
+srsi = ta.hma(ta.rsi(close, rsiLengthInput2), 10)
+hullrsi1 = ta.rsi(MHULL, rsiLengthInput)
+hullrsi2 = ta.rsi(SHULL, rsiLengthInput)
+
+hu1 = plot(show_Baseline ? hullrsi1 : frsi, title='HMA1', color=color.gray, linewidth=1, display=display.none)
+hu2 = plot(show_Baseline ? hullrsi2 : srsi, title='HMA2', color=color.gray, linewidth=1, display=display.none)
+fill(hu1, hu2, title='HULL RSI TREND', color=show_Baseline ? hmac : na)
+
+rsiUpperBand = hline(overbought, "RSI Upper Band", color=color.red, linestyle=hline.style_dotted, display=display.none)
+rsiLowerBand = hline(oversold, "RSI Lower Band", color=color.green, linestyle=hline.style_dotted, display=display.none)
+fill(rsiUpperBand, rsiLowerBand, title='RSI Band', color=color.new(color.red, 80))
+
+plotshape(series=buysignal and sellsignal[1] ? hullrsi1 : na, title='Buy', style=shape.triangleup, location=location.absolute, color=color.new(color.yellow, 0), size=size.tiny, offset=0)
+plotshape(series=sellsignal and buysignal[1] ? hullrsi1 : na, title='Sell', style=shape.triangledown, location=location.absolute, color=color.new(color.red, 0), size=size.tiny, offset=0)
+
+// Strategy Logic
+enter_long = bullish and (hullrsi1 <= oversold) and (frsi < srsi) and (hmac != color.gray)
+enter_short = bearish and (hullrsi1 >= overbought) and (frsi > srsi) and (hmac != color.gray)
+
+if (window())
+    if (enter_long)
+        strategy.entry("Long", strategy.long)
+        if (strategy.position_size < 0)
+            strategy.close("Short")
+        strategy.exit("Exit Long", "Long", stop=strategy.position_avg_price * (1 - stop_loss / 100))
+        alert("Buy Signal", alert.freq_once_per_bar_close)
+        
+    if (enter_short)
+        strategy.entry("Short", strategy.short)
+        if (strategy.position_size > 0)
+            strategy.close("Long")
+        strategy.exit("Exit Short", "Short", stop=strategy.position_avg_price * (1 + stop_loss / 100))
+        alert("Sell Signal", alert.freq_once_per_bar_close)

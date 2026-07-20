@@ -1,0 +1,222 @@
+//@version=5
+indicator('SuperTrend Auto Trading for Bitget', overlay=true, format=format.price, precision=2)
+
+// ====== SUPERTREND SETTINGS ======
+group1 = "═══════════ SuperTrend Settings ═══════════"
+Periods = input.int(title='ATR Period', defval=10, group=group1)
+src = input(hl2, title='Source', group=group1)
+Multiplier = input.float(title='ATR Multiplier', step=0.1, defval=3.0, group=group1)
+changeATR = input.bool(title='Change ATR Calculation Method ?', defval=true, group=group1)
+showsignals = input.bool(title='Show Buy/Sell Signals ?', defval=true, group=group1)
+highlighting = input.bool(title='Highlighter On/Off ?', defval=true, group=group1)
+
+// ====== TRADING SETTINGS ======
+group2 = "═══════════ Trading Settings ═══════════"
+enableAutoTrade = input.bool(true, "Enable Auto Trading Alerts", group=group2)
+tradeMode = input.string("Both", "Trade Direction", options=["Long Only", "Short Only", "Both"], group=group2)
+confirmationBars = input.int(0, "Confirmation Bars", minval=0, maxval=3, group=group2)
+reverseSignals = input.bool(false, "Reverse Signals", group=group2)
+
+// ====== RISK MANAGEMENT ======
+group3 = "═══════════ Risk Management ═══════════"
+accountBalance = input.float(1000, "Account Balance (USDT)", minval=10, group=group3)
+riskPerTrade = input.float(1.0, "Risk Per Trade (%)", minval=0.1, maxval=10, step=0.1, group=group3)
+leverage = input.int(10, "Leverage", minval=1, maxval=125, group=group3)
+useStopLoss = input.bool(true, "Use Stop Loss", group=group3)
+stopLossPercent = input.float(2.0, "Stop Loss (%)", minval=0.1, maxval=10, step=0.1, group=group3)
+useTakeProfit = input.bool(true, "Use Take Profit", group=group3)
+takeProfitPercent = input.float(4.0, "Take Profit (%)", minval=0.1, maxval=20, step=0.1, group=group3)
+useTrailingStop = input.bool(false, "Use Trailing Stop", group=group3)
+trailingPercent = input.float(1.5, "Trailing Stop (%)", minval=0.1, maxval=10, step=0.1, group=group3)
+
+// ====== WEBHOOK SETTINGS ======
+group4 = "═══════════ Webhook Settings ═══════════"
+webhookUrl = input.string("YOUR_WEBHOOK_URL", "Webhook URL", group=group4)
+apiKey = input.string("YOUR_API_KEY", "API Key", group=group4)
+secretKey = input.string("YOUR_SECRET", "Secret Key", group=group4)
+passphrase = input.string("YOUR_PASSPHRASE", "Passphrase", group=group4)
+
+// ====== TIME FILTER ======
+group5 = "═══════════ Time Filter ═══════════"
+useTimeFilter = input.bool(false, "Use Time Filter", group=group5)
+startTime = input.time(timestamp("2024-01-01"), "Start Date", group=group5)
+endTime = input.time(timestamp("2025-12-31"), "End Date", group=group5)
+tradingSession = input.string("0000-0000", "Trading Session (e.g., 0900-1700)", group=group5)
+
+// ====== SUPERTREND CALCULATION ======
+atr2 = ta.sma(ta.tr, Periods)
+atr = changeATR ? ta.atr(Periods) : atr2
+up = src - Multiplier * atr
+up1 = nz(up[1], up)
+up := close[1] > up1 ? math.max(up, up1) : up
+dn = src + Multiplier * atr
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+
+// ====== SIGNAL GENERATION ======
+buySignalRaw = trend == 1 and trend[1] == -1
+sellSignalRaw = trend == -1 and trend[1] == 1
+
+// Apply confirmation bars
+buySignal = confirmationBars == 0 ? buySignalRaw : buySignalRaw and buySignalRaw[confirmationBars]
+sellSignal = confirmationBars == 0 ? sellSignalRaw : sellSignalRaw and sellSignalRaw[confirmationBars]
+
+// Apply reverse signals if enabled
+finalBuySignal = reverseSignals ? sellSignal : buySignal
+finalSellSignal = reverseSignals ? buySignal : sellSignal
+
+// Apply trade direction filter
+longAllowed = tradeMode == "Both" or tradeMode == "Long Only"
+shortAllowed = tradeMode == "Both" or tradeMode == "Short Only"
+
+longSignal = finalBuySignal and longAllowed
+shortSignal = finalSellSignal and shortAllowed
+
+// ====== TIME FILTER CHECK ======
+inTimeRange = not useTimeFilter or (time >= startTime and time <= endTime)
+inSession = not useTimeFilter or time(timeframe.period, tradingSession) != 0
+
+canTrade = inTimeRange and inSession
+
+// ====== POSITION SIZE CALCULATION ======
+riskAmount = accountBalance * (riskPerTrade / 100)
+positionSizeUSDT = riskAmount * leverage
+positionSize = math.round(positionSizeUSDT * 100) / 100
+
+// ====== STOP LOSS & TAKE PROFIT LEVELS ======
+longStopLoss = close * (1 - stopLossPercent / 100)
+longTakeProfit = close * (1 + takeProfitPercent / 100)
+shortStopLoss = close * (1 + stopLossPercent / 100)
+shortTakeProfit = close * (1 - takeProfitPercent / 100)
+
+// ====== POSITION TRACKING ======
+var bool inLongPosition = false
+var bool inShortPosition = false
+var float entryPrice = 0.0
+var float positionSL = 0.0
+var float positionTP = 0.0
+var int entryBar = 0
+
+// Update position status
+if longSignal and not inLongPosition and canTrade
+    inLongPosition := true
+    inShortPosition := false
+    entryPrice := close
+    positionSL := longStopLoss
+    positionTP := longTakeProfit
+    entryBar := bar_index
+
+if shortSignal and not inShortPosition and canTrade
+    inShortPosition := true
+    inLongPosition := false
+    entryPrice := close
+    positionSL := shortStopLoss
+    positionTP := shortTakeProfit
+    entryBar := bar_index
+
+// Check exit conditions
+longHitSL = inLongPosition and low <= positionSL
+longHitTP = inLongPosition and high >= positionTP
+shortHitSL = inShortPosition and high >= positionSL
+shortHitTP = inShortPosition and low <= positionTP
+
+if longHitSL or longHitTP or (shortSignal and inLongPosition)
+    inLongPosition := false
+    
+if shortHitSL or shortHitTP or (longSignal and inShortPosition)
+    inShortPosition := false
+
+// ====== WEBHOOK JSON MESSAGES (all on single lines) ======
+// Open Long Message
+openLongJson = '{"action":"open","symbol":"' + syminfo.ticker + '","side":"buy","type":"market","leverage":' + str.tostring(leverage) + ',"amount":' + str.tostring(positionSize) + ',"stopLoss":' + str.tostring(longStopLoss) + ',"takeProfit":' + str.tostring(longTakeProfit) + ',"apiKey":"' + apiKey + '","secret":"' + secretKey + '","passphrase":"' + passphrase + '"}'
+
+// Open Short Message
+openShortJson = '{"action":"open","symbol":"' + syminfo.ticker + '","side":"sell","type":"market","leverage":' + str.tostring(leverage) + ',"amount":' + str.tostring(positionSize) + ',"stopLoss":' + str.tostring(shortStopLoss) + ',"takeProfit":' + str.tostring(shortTakeProfit) + ',"apiKey":"' + apiKey + '","secret":"' + secretKey + '","passphrase":"' + passphrase + '"}'
+
+// Close Long Message
+closeLongJson = '{"action":"close","symbol":"' + syminfo.ticker + '","side":"sell","type":"market","closePosition":true,"apiKey":"' + apiKey + '","secret":"' + secretKey + '","passphrase":"' + passphrase + '"}'
+
+// Close Short Message
+closeShortJson = '{"action":"close","symbol":"' + syminfo.ticker + '","side":"buy","type":"market","closePosition":true,"apiKey":"' + apiKey + '","secret":"' + secretKey + '","passphrase":"' + passphrase + '"}'
+
+// ====== SEND ALERTS ======
+if enableAutoTrade
+    // Long Entry
+    if longSignal and not inLongPosition[1] and canTrade
+        alert(openLongJson, alert.freq_once_per_bar)
+        if inShortPosition[1]
+            alert(closeShortJson, alert.freq_once_per_bar)
+    
+    // Short Entry
+    if shortSignal and not inShortPosition[1] and canTrade
+        alert(openShortJson, alert.freq_once_per_bar)
+        if inLongPosition[1]
+            alert(closeLongJson, alert.freq_once_per_bar)
+    
+    // Exit on Stop Loss or Take Profit
+    if longHitSL or longHitTP
+        alert(closeLongJson, alert.freq_once_per_bar)
+    
+    if shortHitSL or shortHitTP
+        alert(closeShortJson, alert.freq_once_per_bar)
+
+// ====== VISUAL PLOTS ======
+upPlot = plot(trend == 1 ? up : na, title='Up Trend', style=plot.style_linebr, linewidth=2, color=color.new(color.green, 0))
+buyPlotSignal = longSignal and canTrade
+plotshape(buyPlotSignal ? up : na, title='UpTrend Begins', location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(color.green, 0))
+plotshape(buyPlotSignal and showsignals ? up : na, title='Buy', text='BUY', location=location.absolute, style=shape.labelup, size=size.tiny, color=color.new(color.green, 0), textcolor=color.new(color.white, 0))
+
+dnPlot = plot(trend == 1 ? na : dn, title='Down Trend', style=plot.style_linebr, linewidth=2, color=color.new(color.red, 0))
+sellPlotSignal = shortSignal and canTrade
+plotshape(sellPlotSignal ? dn : na, title='DownTrend Begins', location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(color.red, 0))
+plotshape(sellPlotSignal and showsignals ? dn : na, title='Sell', text='SELL', location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.new(color.red, 0), textcolor=color.new(color.white, 0))
+
+mPlot = plot(ohlc4, title='', style=plot.style_circles, linewidth=0)
+longFillColor = highlighting ? (trend == 1 ? color.new(color.green, 90) : color.new(color.white, 100)) : color.new(color.white, 100)
+shortFillColor = highlighting ? (trend == -1 ? color.new(color.red, 90) : color.new(color.white, 100)) : color.new(color.white, 100)
+fill(mPlot, upPlot, title='UpTrend Highligter', color=longFillColor)
+fill(mPlot, dnPlot, title='DownTrend Highligter', color=shortFillColor)
+
+// Position Lines
+if inLongPosition
+    line.new(entryBar, entryPrice, bar_index, entryPrice, color=color.blue, width=1, style=line.style_dashed)
+    line.new(entryBar, positionSL, bar_index, positionSL, color=color.red, width=1, style=line.style_dotted)
+    line.new(entryBar, positionTP, bar_index, positionTP, color=color.green, width=1, style=line.style_dotted)
+
+if inShortPosition
+    line.new(entryBar, entryPrice, bar_index, entryPrice, color=color.purple, width=1, style=line.style_dashed)
+    line.new(entryBar, positionSL, bar_index, positionSL, color=color.red, width=1, style=line.style_dotted)
+    line.new(entryBar, positionTP, bar_index, positionTP, color=color.green, width=1, style=line.style_dotted)
+
+// ====== INFO TABLE ======
+var table infoTable = table.new(position.top_right, 2, 7)
+
+table.cell(infoTable, 0, 0, "Status", bgcolor=color.black, text_color=color.white, text_size=size.small)
+table.cell(infoTable, 1, 0, inLongPosition ? "LONG" : inShortPosition ? "SHORT" : "NO POSITION", bgcolor=inLongPosition ? color.green : inShortPosition ? color.red : color.gray, text_color=color.white, text_size=size.small)
+
+table.cell(infoTable, 0, 1, "Position Size", bgcolor=color.gray, text_color=color.white, text_size=size.small)
+table.cell(infoTable, 1, 1, str.tostring(positionSize) + " USDT", bgcolor=color.gray, text_color=color.white, text_size=size.small)
+
+table.cell(infoTable, 0, 2, "Leverage", bgcolor=color.gray, text_color=color.white, text_size=size.small)
+table.cell(infoTable, 1, 2, str.tostring(leverage) + "x", bgcolor=color.gray, text_color=color.white, text_size=size.small)
+
+table.cell(infoTable, 0, 3, "Entry Price", bgcolor=color.gray, text_color=color.white, text_size=size.small)
+table.cell(infoTable, 1, 3, (inLongPosition or inShortPosition) ? str.tostring(entryPrice, "#.####") : "N/A", bgcolor=color.gray, text_color=color.white, text_size=size.small)
+
+table.cell(infoTable, 0, 4, "Stop Loss", bgcolor=color.gray, text_color=color.white, text_size=size.small)
+table.cell(infoTable, 1, 4, (inLongPosition or inShortPosition) ? str.tostring(positionSL, "#.####") : "N/A", bgcolor=color.red, text_color=color.white, text_size=size.small)
+
+table.cell(infoTable, 0, 5, "Take Profit", bgcolor=color.gray, text_color=color.white, text_size=size.small)
+table.cell(infoTable, 1, 5, (inLongPosition or inShortPosition) ? str.tostring(positionTP, "#.####") : "N/A", bgcolor=color.green, text_color=color.white, text_size=size.small)
+
+table.cell(infoTable, 0, 6, "Trend", bgcolor=color.gray, text_color=color.white, text_size=size.small)
+table.cell(infoTable, 1, 6, trend == 1 ? "BULLISH" : "BEARISH", bgcolor=trend == 1 ? color.green : color.red, text_color=color.white, text_size=size.small)
+
+// ====== ALERT CONDITIONS (Legacy compatibility) ======
+alertcondition(buySignalRaw, title='SuperTrend Buy', message='SuperTrend Buy!')
+alertcondition(sellSignalRaw, title='SuperTrend Sell', message='SuperTrend Sell!')
+changeCond = trend != trend[1]
+alertcondition(changeCond, title='SuperTrend Direction Change', message='SuperTrend has changed direction!')

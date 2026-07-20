@@ -1,0 +1,142 @@
+//@version=5
+strategy('SuperTrend Strategy CLEAN NON-REPAINT', overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1, slippage=1, process_orders_on_close=true)
+
+// ====== SUPERTREND SETTINGS ======
+group1 = "═══════════ SuperTrend Settings ═══════════"
+Periods = input.int(title='ATR Period', defval=10, group=group1)
+src = input(hl2, title='Source', group=group1)
+Multiplier = input.float(title='ATR Multiplier', step=0.1, defval=3.0, group=group1)
+changeATR = input.bool(title='Change ATR Calculation Method ?', defval=true, group=group1)
+showsignals = input.bool(title='Show Buy/Sell Signals ?', defval=true, group=group1)
+highlighting = input.bool(title='Highlighter On/Off ?', defval=true, group=group1)
+
+// ====== SIMPLE FILTERS ======
+group2 = "═══════════ Simple Filters ═══════════"
+useFilters = input.bool(false, "Enable Filters", group=group2)
+rsiLength = input.int(14, "RSI Length (for filter)", minval=2, maxval=50, group=group2)
+rsiOverbought = input.float(75, "RSI Overbought", minval=60, maxval=90, group=group2)
+rsiOversold = input.float(25, "RSI Oversold", minval=10, maxval=40, group=group2)
+
+// ====== TRADING SETTINGS ======
+group3 = "═══════════ Trading Settings ═══════════"
+tradeMode = input.string("Both", "Trade Direction", options=["Long Only", "Short Only", "Both"], group=group3)
+confirmationBars = input.int(0, "Confirmation Bars", minval=0, maxval=3, group=group3)
+reverseSignals = input.bool(false, "Reverse Signals", group=group3)
+closeOnOpposite = input.bool(true, "Close on Opposite Signal", group=group3)
+
+// ====== RISK MANAGEMENT ======
+group4 = "═══════════ Risk Management ═══════════"
+useStopLoss = input.bool(true, "Use Stop Loss", group=group4)
+stopLossPercent = input.float(2.0, "Stop Loss (%)", minval=0.1, maxval=10, step=0.1, group=group4)
+useTakeProfit = input.bool(true, "Use Take Profit", group=group4)
+takeProfitPercent = input.float(4.0, "Take Profit (%)", minval=0.1, maxval=20, step=0.1, group=group4)
+useTrailingStop = input.bool(false, "Use Trailing Stop", group=group4)
+trailingPercent = input.float(1.5, "Trailing Stop (%)", minval=0.1, maxval=10, step=0.1, group=group4)
+trailingActivation = input.float(2.0, "Trailing Activation (%)", minval=0.1, maxval=10, step=0.1, group=group4)
+
+// ====== BACKTEST PERIOD ======
+group5 = "═══════════ Backtest Period ═══════════"
+useBacktestPeriod = input.bool(true, "Use Backtest Period", group=group5)
+backtestStart = input.time(timestamp("2024-01-01"), "Backtest Start", group=group5)
+backtestEnd = input.time(timestamp("2025-01-01"), "Backtest End", group=group5)
+
+// ====== SUPERTREND CALCULATION ======
+atr2 = ta.sma(ta.tr, Periods)
+atr = changeATR ? ta.atr(Periods) : atr2
+up = src - Multiplier * atr
+up1 = nz(up[1], up)
+up := close[1] > up1 ? math.max(up, up1) : up
+dn = src + Multiplier * atr
+dn1 = nz(dn[1], dn)
+dn := close[1] < dn1 ? math.min(dn, dn1) : dn
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+
+// ====== SIGNAL GENERATION ======
+buySignalRaw = trend == 1 and trend[1] == -1
+sellSignalRaw = trend == -1 and trend[1] == 1
+
+// ====== SIMPLE RSI FILTER (OPTIONAL) ======
+rsi = ta.rsi(close, rsiLength)
+rsiAllowLong = not useFilters or rsi[1] < rsiOverbought
+rsiAllowShort = not useFilters or rsi[1] > rsiOversold
+
+// Apply confirmation bars
+buySignal = confirmationBars == 0 ? buySignalRaw : buySignalRaw and buySignalRaw[confirmationBars]
+sellSignal = confirmationBars == 0 ? sellSignalRaw : sellSignalRaw and sellSignalRaw[confirmationBars]
+
+// Apply reverse signals if enabled
+finalBuySignal = reverseSignals ? sellSignal : buySignal
+finalSellSignal = reverseSignals ? buySignal : sellSignal
+
+// Apply trade direction filter
+longAllowed = tradeMode == "Both" or tradeMode == "Long Only"
+shortAllowed = tradeMode == "Both" or tradeMode == "Short Only"
+
+// Apply filters
+longSignal = finalBuySignal and longAllowed and rsiAllowLong
+shortSignal = finalSellSignal and shortAllowed and rsiAllowShort
+
+// ====== TIME CHECK ======
+inBacktestPeriod = not useBacktestPeriod or (time >= backtestStart and time <= backtestEnd)
+canTrade = inBacktestPeriod
+
+// ====== STRATEGY EXECUTION ======
+if canTrade
+    // Long Entry
+    if longSignal
+        if closeOnOpposite and strategy.position_size < 0
+            strategy.close("Short", comment="Close Short - Reversal")
+        
+        strategy.entry("Long", strategy.long, comment="Long Entry")
+        
+        // Set Stop Loss and Take Profit
+        if useStopLoss or useTakeProfit or useTrailingStop
+            longStopPrice = useStopLoss ? close * (1 - stopLossPercent / 100) : na
+            longTakeProfitPrice = useTakeProfit ? close * (1 + takeProfitPercent / 100) : na
+            
+            if useTrailingStop
+                trailActivationPrice = close * (1 + trailingActivation / 100)
+                trailOffset = close * trailingPercent / 100
+                strategy.exit("Long Exit", "Long", stop=longStopPrice, limit=longTakeProfitPrice, trail_price=trailActivationPrice, trail_offset=trailOffset, comment="Long Exit")
+            else
+                strategy.exit("Long Exit", "Long", stop=longStopPrice, limit=longTakeProfitPrice, comment="Long Exit")
+    
+    // Short Entry
+    if shortSignal
+        if closeOnOpposite and strategy.position_size > 0
+            strategy.close("Long", comment="Close Long - Reversal")
+        
+        strategy.entry("Short", strategy.short, comment="Short Entry")
+        
+        // Set Stop Loss and Take Profit
+        if useStopLoss or useTakeProfit or useTrailingStop
+            shortStopPrice = useStopLoss ? close * (1 + stopLossPercent / 100) : na
+            shortTakeProfitPrice = useTakeProfit ? close * (1 - takeProfitPercent / 100) : na
+            
+            if useTrailingStop
+                trailActivationPrice = close * (1 - trailingActivation / 100)
+                trailOffset = close * trailingPercent / 100
+                strategy.exit("Short Exit", "Short", stop=shortStopPrice, limit=shortTakeProfitPrice, trail_price=trailActivationPrice, trail_offset=trailOffset, comment="Short Exit")
+            else
+                strategy.exit("Short Exit", "Short", stop=shortStopPrice, limit=shortTakeProfitPrice, comment="Short Exit")
+
+// Close all positions outside of trading time
+if not canTrade and strategy.position_size != 0
+    strategy.close_all(comment="Outside Trading Time")
+
+// ====== VISUAL PLOTS ======
+upPlot = plot(trend == 1 ? up : na, title='Up Trend', style=plot.style_linebr, linewidth=2, color=color.new(color.green, 0))
+plotshape(longSignal and canTrade ? up : na, title='UpTrend Begins', location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(color.green, 0))
+plotshape(longSignal and showsignals and canTrade ? up : na, title='Buy', text='BUY', location=location.absolute, style=shape.labelup, size=size.tiny, color=color.new(color.green, 0), textcolor=color.new(color.white, 0))
+
+dnPlot = plot(trend == 1 ? na : dn, title='Down Trend', style=plot.style_linebr, linewidth=2, color=color.new(color.red, 0))
+plotshape(shortSignal and canTrade ? dn : na, title='DownTrend Begins', location=location.absolute, style=shape.circle, size=size.tiny, color=color.new(color.red, 0))
+plotshape(shortSignal and showsignals and canTrade ? dn : na, title='Sell', text='SELL', location=location.absolute, style=shape.labeldown, size=size.tiny, color=color.new(color.red, 0), textcolor=color.new(color.white, 0))
+
+mPlot = plot(ohlc4, title='', style=plot.style_circles, linewidth=0)
+longFillColor = highlighting ? (trend == 1 ? color.new(color.green, 90) : color.new(color.white, 100)) : color.new(color.white, 100)
+shortFillColor = highlighting ? (trend == -1 ? color.new(color.red, 90) : color.new(color.white, 100)) : color.new(color.white, 100)
+fill(mPlot, upPlot, title='UpTrend Highlighter', color=longFillColor)
+fill(mPlot, dnPlot, title='DownTrend Highlighter', color=shortFillColor)

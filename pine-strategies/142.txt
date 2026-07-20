@@ -1,0 +1,71 @@
+// Converted from study to strategy script
+//@version=6
+strategy("Double Zig Zag with HHLL Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// Inputs
+prd1 = input.int(8, title="ZigZag Period 1", minval=2, maxval=20)
+prd2 = input.int(20, title="ZigZag Period 2", minval=2, maxval=50)
+stopLossPerc = input.float(2.0, title="Stop Loss %")
+takeProfitPerc = input.float(5.0, title="Take Profit %")
+timeStart = input.time(timestamp("2025-01-01 00:00 +0000"), title="Start Time")
+timeEnd = input.time(timestamp("2029-01-01 00:00 +0000"), title="End Time")
+reversibleMode = input.bool(false, title="Enable Reversible Mode")
+trendPeriod = input.int(50, title="Trend SMA Period")
+
+// ZigZag Logic
+ph1 = ta.highestbars(high, prd1) == 0 ? high : na
+pl1 = ta.lowestbars(low, prd1) == 0 ? low : na
+ph2 = ta.highestbars(high, prd2) == 0 ? high : na
+pl2 = ta.lowestbars(low, prd2) == 0 ? low : na
+
+var int dir1 = 0
+var int dir2 = 0
+dir1 := (not na(ph1)) and na(pl1) ? 1 : (not na(pl1)) and na(ph1) ? -1 : dir1
+dir2 := (not na(ph2)) and na(pl2) ? 1 : (not na(pl2)) and na(ph2) ? -1 : dir2
+
+// Trend Filter
+smaTrend = ta.sma(close, trendPeriod)
+upTrend = close > smaTrend
+downTrend = close < smaTrend
+
+// Time Condition
+withinTime = (time >= timeStart and time <= timeEnd)
+
+// Bar Color Check
+newBarGreen = close > open
+newBarRed = close < open
+
+// Trade signals
+longCondition = withinTime and dir1 == 1 and dir2 == 1 and upTrend and not newBarRed
+shortCondition = withinTime and dir1 == -1 and dir2 == -1 and downTrend and not newBarGreen
+
+// Reversible Mode Signals
+reverseLongCondition = reversibleMode and shortCondition and upTrend and not newBarRed
+reverseShortCondition = reversibleMode and longCondition and downTrend and not newBarGreen
+
+// Strategy Orders
+if longCondition
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Take Profit", from_entry="Long", limit=close * (1 + takeProfitPerc / 100))
+    strategy.exit("Stop Loss", from_entry="Long", stop=close * (1 - stopLossPerc / 100))
+
+if shortCondition
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Take Profit", from_entry="Short", limit=close * (1 - takeProfitPerc / 100))
+    strategy.exit("Stop Loss", from_entry="Short", stop=close * (1 + stopLossPerc / 100))
+
+if reverseLongCondition
+    strategy.close("Short")
+    strategy.entry("Long", strategy.long)
+
+if reverseShortCondition
+    strategy.close("Long")
+    strategy.entry("Short", strategy.short)
+
+// Alerts
+alertcondition(longCondition, title="Buy Signal", message="Buy triggered")
+alertcondition(shortCondition, title="Sell Signal", message="Sell triggered")
+alertcondition(reverseLongCondition, title="Reversal Buy", message="Reversal Buy triggered")
+alertcondition(reverseShortCondition, title="Reversal Sell", message="Reversal Sell triggered")

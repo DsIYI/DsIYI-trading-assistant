@@ -1,0 +1,37 @@
+//@version=5
+strategy("Divergence and Pivot Point Strategy", overlay=true, title="Divergence and Pivot Point Strategy")
+
+// User-defined inputs
+showpivot = input(true, title="Show Pivot Points")
+showlines = input(true, title="Show Divergence Lines")
+prd = input.int(6, title="Pivot Period", minval=1, maxval=50)
+source = input.string('Close', title="Source for Pivot Points", options=['Close', 'High/Low'])
+
+// Indicator calculations
+ph = ta.pivothigh(source == 'Close' ? close : high, prd, prd)
+pl = ta.pivotlow(source == 'Close' ? close : low, prd, prd)
+
+// Trading logic
+if ph
+    strategy.entry("Sell", strategy.short)
+if pl
+    strategy.entry("Buy", strategy.long)
+
+// Visualization of pivot points
+if showpivot and ph
+    plotshape(series=ph, location=location.abovebar, color=color.red, style=shape.triangledown, text="H", title="Pivot High")
+if showpivot and pl
+    plotshape(series=pl, location=location.belowbar, color=color.green, style=shape.triangleup, text="L", title="Pivot Low")
+
+// Optionally plot divergence lines and labels
+if showlines
+    if ph
+        label.new(x=bar_index[prd], y=high[prd], text="High Pivot", color=color.red, style=label.style_label_down, size=size.large)
+    if pl
+        label.new(x=bar_index, y=low, text="Low Pivot", color=color.green, style=label.style_label_up, size=size.large)
+    if ph and pl
+        line.new(x1=bar_index[prd], y1=high[prd], x2=bar_index, y2=low, color=color.purple, width=2, title="Divergence Line")
+
+// Alert conditions for detected pivots
+alertcondition(ph, title="Sell Alert", message="Potential sell signal at Pivot High")
+alertcondition(pl, title="Buy Alert", message="Potential buy signal at Pivot Low")

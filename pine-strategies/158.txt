@@ -1,0 +1,57 @@
+//@version=6
+indicator(title = 'Heikin Ashi Trend Indicator', shorttitle = 'HAT', overlay = true)
+res = input.timeframe(title = 'Resolution', defval = '')
+colorBars = input(title = 'Color bars', defval = false)
+show_label_signals = input(false, title = 'Show Label signals')
+// === Input ===
+percentSqueeze = input.float(0.2, step = 0.1)
+
+// === Tilson T3 ===
+
+T3Factor = input.float(defval = 0.3, minval = 0, maxval = 100, step = 0.1, title = 'T3 Factor')
+T3Length = input.int(defval = 7, minval = 1, title = 'T3 Length')
+T3FactorCalc = T3Factor * .10
+gd(src, T3Length, T3FactorCalc) =>
+    ta.ema(src, T3Length) * (1 + T3FactorCalc) - ta.ema(ta.ema(src, T3Length), T3Length) * T3FactorCalc
+t3(src, T3Length, T3FactorCalc) =>
+    gd(gd(gd(src, T3Length, T3FactorCalc), T3Length, T3FactorCalc), T3Length, T3FactorCalc)
+
+o = open
+c = close
+h = high
+l = low
+
+ha_t = ticker.heikinashi(syminfo.tickerid)
+ha_o = request.security(ha_t, res, o)
+ha_c = request.security(ha_t, res, c)
+ha_h = request.security(ha_t, res, h)
+ha_l = request.security(ha_t, res, l)
+o2 = t3(ha_o, T3Length, T3FactorCalc)
+c2 = t3(ha_c, T3Length, T3FactorCalc)
+h2 = t3(ha_h, T3Length, T3FactorCalc)
+l2 = t3(ha_l, T3Length, T3FactorCalc)
+
+percentHL = 0.0
+
+percentHL := (o2 - c2) / math.avg(o2, c2) * 100
+
+high_squeeze = math.abs(percentHL) < percentSqueeze and percentHL > 0
+low_squeeze = math.abs(percentHL) < percentSqueeze and percentHL < 0
+
+crossPlot = 0.0
+if o2 < c2
+    crossPlot := l2
+    crossPlot
+else
+    crossPlot := h2
+    crossPlot
+o2_cross_under_long = ta.crossunder(o2, c2)
+c2_cross_over_short = ta.crossover(o2, c2)
+plotColor = high_squeeze ? color.maroon : low_squeeze ? color.teal : o2 < c2 ? color.lime : color.red
+plot(crossPlot, color = plotColor, style = plot.style_cross, linewidth = 2)
+barcolor(colorBars ? plotColor : na)
+//Alert calls
+plotshape(o2_cross_under_long and show_label_signals ? close : na, title = 'Buy', text = 'B', location = location.belowbar, style = shape.labelup, size = size.tiny, color = color.new(color.green, 0), textcolor = color.new(color.white, 0))
+alertcondition(o2_cross_under_long, title = 'Buy', message = 'Buy Alert')
+plotshape(c2_cross_over_short and show_label_signals ? close : na, title = 'Sell', text = 'S', location = location.abovebar, style = shape.labeldown, size = size.tiny, color = color.new(color.red, 0), textcolor = color.new(color.white, 0))
+alertcondition(c2_cross_over_short, title = 'Sell', message = 'Sell Alert') 

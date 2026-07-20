@@ -1,0 +1,221 @@
+//@version=5
+strategy("JohnStrategy [Optimized]", 
+         overlay=true, 
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=10,
+         commission_type=strategy.commission.percent,
+         commission_value=0.055,
+         pyramiding=0)
+
+//══════════════════════════════════════════════════════════════════════════════
+// DATE RANGE
+//══════════════════════════════════════════════════════════════════════════════
+g_date = "Backtesting Period"
+startDate = input.time(timestamp("2023-01-01T00:00:00"), "Start Date", group=g_date)
+endDate = input.time(timestamp("2025-12-31T00:00:00"), "End Date", group=g_date)
+inDateRange = time >= startDate and time <= endDate
+
+//══════════════════════════════════════════════════════════════════════════════
+// ATR TRAILING STOP SETTINGS
+//══════════════════════════════════════════════════════════════════════════════
+g_atr = "ATR Trailing Stop"
+atrSensitivity = input.float(1.0, "ATR Multiplier", minval=0.1, maxval=10, step=0.1, group=g_atr)
+atrPeriod = input.int(10, "ATR Period", minval=1, maxval=50, group=g_atr)
+useHeikinAshi = input.bool(false, "Use Heikin Ashi", group=g_atr)
+
+//══════════════════════════════════════════════════════════════════════════════
+// FILTERS (ACTUALLY USED NOW!)
+//══════════════════════════════════════════════════════════════════════════════
+g_filter = "Trend Filters"
+useEMAFilter = input.bool(true, "Enable EMA Filter?", group=g_filter)
+emaLength = input.int(50, "EMA Length", minval=10, maxval=200, group=g_filter)
+
+useBBFilter = input.bool(false, "Enable Bollinger Bands Filter?", group=g_filter)
+bbLength = input.int(20, "BB Length", minval=5, maxval=100, group=g_filter)
+bbMult = input.float(2.0, "BB Std Dev", minval=0.5, maxval=5, step=0.1, group=g_filter)
+
+useVolumeFilter = input.bool(true, "Enable Volume Filter?", group=g_filter)
+volumeLength = input.int(20, "Volume MA Length", minval=5, maxval=100, group=g_filter)
+
+//══════════════════════════════════════════════════════════════════════════════
+// RISK MANAGEMENT
+//══════════════════════════════════════════════════════════════════════════════
+g_risk = "Risk Management"
+useStopLoss = input.bool(true, "Enable Stop Loss?", group=g_risk)
+stopLossPercent = input.float(2.0, "Stop Loss %", minval=0.5, maxval=10, step=0.1, group=g_risk)
+
+useTakeProfit = input.bool(true, "Enable Take Profit?", group=g_risk)
+takeProfitPercent = input.float(4.0, "Take Profit %", minval=1, maxval=20, step=0.5, group=g_risk)
+
+useTrailing = input.bool(false, "Enable Trailing Stop?", group=g_risk)
+trailingPercent = input.float(1.5, "Trailing Stop %", minval=0.5, maxval=5, step=0.1, group=g_risk)
+
+//══════════════════════════════════════════════════════════════════════════════
+// CALCULATIONS
+//══════════════════════════════════════════════════════════════════════════════
+
+// Source (with Heikin Ashi option)
+src = useHeikinAshi ? request.security(ticker.heikinashi(syminfo.tickerid), timeframe.period, close, lookahead=barmerge.lookahead_off) : close
+
+// ATR Trailing Stop
+xATR = ta.atr(atrPeriod)
+nLoss = atrSensitivity * xATR
+
+var float xATRTrailingStop = 0.0
+
+if src > nz(xATRTrailingStop[1], 0) and src[1] > nz(xATRTrailingStop[1], 0)
+    xATRTrailingStop := math.max(nz(xATRTrailingStop[1]), src - nLoss)
+else if src < nz(xATRTrailingStop[1], 0) and src[1] < nz(xATRTrailingStop[1], 0)
+    xATRTrailingStop := math.min(nz(xATRTrailingStop[1]), src + nLoss)
+else if src > nz(xATRTrailingStop[1], 0)
+    xATRTrailingStop := src - nLoss
+else
+    xATRTrailingStop := src + nLoss
+
+// Position determination
+var int pos = 0
+if src[1] < nz(xATRTrailingStop[1], 0) and src > nz(xATRTrailingStop[1], 0)
+    pos := 1
+else if src[1] > nz(xATRTrailingStop[1], 0) and src < nz(xATRTrailingStop[1], 0)
+    pos := -1
+
+// Crossover detection
+above = ta.crossover(src, xATRTrailingStop)
+below = ta.crossunder(src, xATRTrailingStop)
+
+//══════════════════════════════════════════════════════════════════════════════
+// FILTERS
+//══════════════════════════════════════════════════════════════════════════════
+
+// EMA Filter
+ema = ta.ema(close, emaLength)
+emaFilterLong = not useEMAFilter or close > ema
+emaFilterShort = not useEMAFilter or close < ema
+
+// Bollinger Bands Filter
+bbBasis = ta.sma(close, bbLength)
+bbDev = bbMult * ta.stdev(close, bbLength)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+
+bbFilterLong = not useBBFilter or close < bbUpper
+bbFilterShort = not useBBFilter or close > bbLower
+
+// Volume Filter
+volMA = ta.sma(volume, volumeLength)
+volumeFilter = not useVolumeFilter or volume > volMA
+
+//══════════════════════════════════════════════════════════════════════════════
+// SIGNALS
+//══════════════════════════════════════════════════════════════════════════════
+
+buySignal = src > xATRTrailingStop and above and emaFilterLong and bbFilterLong and volumeFilter
+sellSignal = src < xATRTrailingStop and below and emaFilterShort and bbFilterShort and volumeFilter
+
+//══════════════════════════════════════════════════════════════════════════════
+// POSITION CONTROL
+//══════════════════════════════════════════════════════════════════════════════
+
+isLong = strategy.position_size > 0
+isShort = strategy.position_size < 0
+isFlat = strategy.position_size == 0
+
+//══════════════════════════════════════════════════════════════════════════════
+// ENTRY LOGIC
+//══════════════════════════════════════════════════════════════════════════════
+
+if buySignal and isFlat and inDateRange
+    strategy.entry("Long", strategy.long, comment="🟢 BUY")
+    
+    // Exit setup
+    if useStopLoss and useTakeProfit and useTrailing
+        strategy.exit("Exit Long", "Long",
+                     stop=close * (1 - stopLossPercent/100),
+                     limit=close * (1 + takeProfitPercent/100),
+                     trail_offset=trailingPercent/100 * close)
+    else if useStopLoss and useTakeProfit
+        strategy.exit("Exit Long", "Long",
+                     stop=close * (1 - stopLossPercent/100),
+                     limit=close * (1 + takeProfitPercent/100))
+    else if useStopLoss
+        strategy.exit("Exit Long", "Long",
+                     stop=close * (1 - stopLossPercent/100))
+
+if sellSignal and isFlat and inDateRange
+    strategy.entry("Short", strategy.short, comment="🔴 SELL")
+    
+    // Exit setup
+    if useStopLoss and useTakeProfit and useTrailing
+        strategy.exit("Exit Short", "Short",
+                     stop=close * (1 + stopLossPercent/100),
+                     limit=close * (1 - takeProfitPercent/100),
+                     trail_offset=trailingPercent/100 * close)
+    else if useStopLoss and useTakeProfit
+        strategy.exit("Exit Short", "Short",
+                     stop=close * (1 + stopLossPercent/100),
+                     limit=close * (1 - takeProfitPercent/100))
+    else if useStopLoss
+        strategy.exit("Exit Short", "Short",
+                     stop=close * (1 + stopLossPercent/100))
+
+// Close on opposite signal
+if isLong and sellSignal
+    strategy.close("Long", comment="⚠️ Reversal")
+
+if isShort and buySignal
+    strategy.close("Short", comment="⚠️ Reversal")
+
+//══════════════════════════════════════════════════════════════════════════════
+// VISUALIZATION
+//══════════════════════════════════════════════════════════════════════════════
+
+// ATR Trailing Stop
+plot(xATRTrailingStop, "ATR Trailing Stop", 
+     color=pos == 1 ? color.green : color.red, 
+     linewidth=2, 
+     style=plot.style_line)
+
+// EMA
+plot(useEMAFilter ? ema : na, "EMA", color.yellow, 2)
+
+// Bollinger Bands
+plot(useBBFilter ? bbBasis : na, "BB Basis", color.blue)
+plot(useBBFilter ? bbUpper : na, "BB Upper", color.blue, style=plot.style_circles)
+plot(useBBFilter ? bbLower : na, "BB Lower", color.blue, style=plot.style_circles)
+
+// Entry signals
+plotshape(buySignal, "Buy Signal", shape.triangleup, location.belowbar, 
+         color.new(color.lime, 0), size=size.normal, text="BUY")
+plotshape(sellSignal, "Sell Signal", shape.triangledown, location.abovebar, 
+         color.new(color.red, 0), size=size.normal, text="SELL")
+
+// Background
+bgcolor(isLong ? color.new(color.green, 95) : isShort ? color.new(color.red, 95) : na)
+
+// Info table
+var table infoTable = table.new(position.top_right, 2, 6, border_width=1)
+
+if barstate.islast
+    table.cell(infoTable, 0, 0, "Metric", bgcolor=color.gray, text_color=color.white)
+    table.cell(infoTable, 1, 0, "Value", bgcolor=color.gray, text_color=color.white)
+    
+    table.cell(infoTable, 0, 1, "Position", text_color=color.white)
+    posText = isLong ? "LONG" : isShort ? "SHORT" : "FLAT"
+    posColor = isLong ? color.lime : isShort ? color.red : color.gray
+    table.cell(infoTable, 1, 1, posText, text_color=posColor)
+    
+    table.cell(infoTable, 0, 2, "ATR", text_color=color.white)
+    table.cell(infoTable, 1, 2, str.tostring(xATR, "#.####"), text_color=color.white)
+    
+    table.cell(infoTable, 0, 3, "EMA Filter", text_color=color.white)
+    emaStatus = useEMAFilter ? (close > ema ? "BULLISH" : "BEARISH") : "OFF"
+    table.cell(infoTable, 1, 3, emaStatus, text_color=color.white)
+    
+    table.cell(infoTable, 0, 4, "Volume Filter", text_color=color.white)
+    volStatus = useVolumeFilter ? (volume > volMA ? "HIGH" : "LOW") : "OFF"
+    table.cell(infoTable, 1, 4, volStatus, text_color=color.white)
+    
+    table.cell(infoTable, 0, 5, "Win Rate", text_color=color.white)
+    winRate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0
+    table.cell(infoTable, 1, 5, str.tostring(winRate, "#.#") + "%", 
+              text_color=winRate > 50 ? color.lime : color.red)

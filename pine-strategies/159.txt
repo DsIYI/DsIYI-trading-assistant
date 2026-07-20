@@ -1,0 +1,74 @@
+//@version=6
+strategy("Heikin Ashi Corner Catcher [Trend TP Mode]", overlay=true, default_qty_type=strategy.cash, default_qty_value=5000)
+
+// === INPUTS ===
+devPercent      = input.float(1.0, title="ZigZag Deviation %", minval=0.1, step=0.1)
+pivotLength     = input.int(10, title="ZigZag Pivot Length", minval=1)
+minWickRatio    = input.float(1.5, title="Min Wick Ratio (Wick/Body)", step=0.1)
+slPercent       = input.float(0.5, title="Stop Loss %", step=0.001)
+fromDate        = input.time(timestamp("2023-01-01 00:00 +0000"), title="Backtest Start")
+toDate          = input.time(timestamp("2025-12-31 00:00 +0000"), title="Backtest End")
+
+// === HEIKIN ASHI 1S CALCULATION ===
+tf = "1S"
+srcOpen  = request.security(syminfo.tickerid, tf, open)
+srcHigh  = request.security(syminfo.tickerid, tf, high)
+srcLow   = request.security(syminfo.tickerid, tf, low)
+srcClose = request.security(syminfo.tickerid, tf, close)
+
+var float haOpen  = na
+var float haClose = na
+haClose := (srcOpen + srcHigh + srcLow + srcClose) / 4
+haOpen := na(haOpen[1]) ? (srcOpen + srcClose) / 2 : (haOpen[1] + haClose[1]) / 2
+haHigh = math.max(srcHigh, math.max(haOpen, haClose))
+haLow  = math.min(srcLow, math.min(haOpen, haClose))
+
+// === ZIGZAG PIVOT DETECTION ===
+zigzagHigh = ta.pivothigh(haHigh, pivotLength, pivotLength)
+zigzagLow  = ta.pivotlow(haLow, pivotLength, pivotLength)
+
+// === WICK RATIO CONFIRMATION ===
+body = math.abs(haClose - haOpen)
+upperWick = haHigh - math.max(haClose, haOpen)
+lowerWick = math.min(haClose, haOpen) - haLow
+
+isTopReversal = (not na(zigzagHigh)) and (upperWick / body >= minWickRatio)
+isBottomReversal = (not na(zigzagLow)) and (lowerWick / body >= minWickRatio)
+
+// === BACKTEST RANGE ===
+inDateRange = (time >= fromDate and time <= toDate)
+
+// === CANDLE COLOR DIRECTION ===
+isGreen = haClose > haOpen
+isRed   = haClose < haOpen
+
+// === STRATEGY SIGNALS ===
+buySignal  = inDateRange and isGreen and not isGreen[1]
+sellSignal = inDateRange and isRed and not isRed[1]
+
+// === STRATEGY ENTRIES ===
+if buySignal
+    strategy.entry("Buy Long", strategy.long)
+    strategy.close("Sell Short")
+
+if sellSignal
+    strategy.entry("Sell Short", strategy.short)
+    strategy.close("Buy Long")
+
+// === STRATEGY EXITS: TAKE-PROFIT ON COLOR FLIP ===
+if strategy.position_size > 0 and isRed and not isRed[1]
+    strategy.close("Buy Long", comment="TP on Red Flip")
+
+if strategy.position_size < 0 and isGreen and not isGreen[1]
+    strategy.close("Sell Short", comment="TP on Green Flip")
+
+// === STOP LOSS CALC ===
+longSL = haClose * (1 - slPercent / 100)
+shortSL = haClose * (1 + slPercent / 100)
+
+strategy.exit("SL Long", from_entry="Buy Long", stop=longSL)
+strategy.exit("SL Short", from_entry="Sell Short", stop=shortSL)
+
+// === PLOT REVERSALS ===
+plotshape(buySignal, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(sellSignal, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)

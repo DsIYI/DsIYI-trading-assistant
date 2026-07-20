@@ -1,0 +1,133 @@
+//@version=6
+strategy("Non-Repainting Hull Trend Strategy with Trailing/Reversal Exit v2.0 FIXED",overlay = true,default_qty_type = strategy.percent_of_equity,default_qty_value = 15,max_bars_back = 4999,pyramiding = 1,calc_on_every_tick = false,process_orders_on_close = true)  // <-- ВАЖНО: Обработва поръчките при затваряне на бара
+
+// —————————————————————————————————————————————————————————————————————
+// 1) TIMING SETTINGS
+// —————————————————————————————————————————————————————————————————————
+FromMonth = input.int(defval = 10, title = 'From Month', minval = 1, maxval = 12)
+FromDay = input.int(defval = 1, title = 'From Day', minval = 1, maxval = 31)
+FromYear = input.int(defval = 2024, title = 'From Year', minval = 2024)
+ToMonth = input.int(defval = 1, title = 'To Month', minval = 1, maxval = 12)
+ToDay = input.int(defval = 1, title = 'To Day', minval = 1, maxval = 31)
+ToYear = input.int(defval = 9999, title = 'To Year', minval = 2024)
+
+start = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+timeInRange = time >= start and time <= finish
+
+// —————————————————————————————————————————————————————————————————————
+// 2) SLIPPAGE & SPREAD
+// —————————————————————————————————————————————————————————————————————
+slippage = input.float(defval = 0.1, title = 'Slippage (%)')
+spread = input.float(defval = 0.1, title = 'Spread (%)')
+
+// —————————————————————————————————————————————————————————————————————
+// 3) STOP-LOSS & TRAILING STOP (FIXED: използва close[1])
+// —————————————————————————————————————————————————————————————————————
+stopLossPercent = input.float(1.0, 'Stop-Loss (%)', minval = 0.001, maxval = 10.0) + slippage + spread
+trailingStop = input.float(1.5, 'Trailing Stop (%)', step = 0.1) + slippage + spread
+
+// FIXED: Използваме предишната затваряща цена за избягване на repainting
+longStopLoss = close[1] * (1 - stopLossPercent / 100)
+shortStopLoss = close[1] * (1 + stopLossPercent / 100)
+
+// —————————————————————————————————————————————————————————————————————
+// 4) HULL MA
+// —————————————————————————————————————————————————————————————————————
+src = input(close, title = 'Source')
+modeSwitch = input.string('Hma', title = 'Hull Variation', options = ['Hma', 'Thma', 'Ehma'])
+length = input.int(55, title = 'Length')
+lengthMult = input.float(1.0, title = 'Length multiplier')
+switchColor = input.bool(true, 'Color Hull according to trend?')
+candleCol = input.bool(false, title = 'Color candles based on Hull\'s Trend?')
+visualSwitch = input.bool(true, title = 'Show as a Band?')
+thicknesSwitch = input.int(1, title = 'Line Thickness')
+transpSwitch = input.int(40, title = 'Band Transparency', step = 5)
+
+HMA(_src, _length) => ta.wma(2 * ta.wma(_src, _length / 2) - ta.wma(_src, _length), math.round(math.sqrt(_length)))
+EHMA(_src, _length) => ta.ema(2 * ta.ema(_src, _length / 2) - ta.ema(_src, _length), math.round(math.sqrt(_length)))
+THMA(_src, _length) => ta.wma(ta.wma(_src, _length / 3) * 3 - ta.wma(_src, _length / 2) - ta.wma(_src, _length), _length)
+
+Mode(modeSwitch, _src, _len) =>
+    if modeSwitch == 'Hma'
+        HMA(_src, _len)
+    else if modeSwitch == 'Ehma'
+        EHMA(_src, _len)
+    else
+        THMA(_src, _len / 2)
+
+_hull = Mode(modeSwitch, src, int(length * lengthMult))
+HULL = _hull
+MHULL = HULL
+SHULL = HULL[2]
+
+hullColor = switchColor ? (HULL > HULL[2] ? color.green : color.red) : color.new(color.orange, 0)
+Fi1 = plot(MHULL, title='MHULL', color=hullColor, linewidth=math.max(1, thicknesSwitch))
+Fi2 = plot(visualSwitch ? SHULL : na, title='SHULL', color=hullColor, linewidth=math.max(1, thicknesSwitch))
+fill(Fi1, Fi2, title='Band Filler', color=hullColor)
+barcolor(color = candleCol ? (switchColor ? hullColor : na) : na)
+
+// Hull Trend Change Detection (FIXED: използва [1] за потвърждение)
+hullUpTrend = HULL[1] > HULL[3]  // Проверяваме завършени барове
+hullDownTrend = HULL[1] < HULL[3]  // Проверяваме завършени барове
+longHullCrossover = HULL[1] > HULL[3] and HULL[2] <= HULL[4]  // Red to Green на завършен бар
+shortHullCrossover = HULL[1] < HULL[3] and HULL[2] >= HULL[4]  // Green to Red на завършен бар
+
+// —————————————————————————————————————————————————————————————————————
+// 5) VARIANT TOGGLE
+// —————————————————————————————————————————————————————————————————————
+variant = input.string("Variant 1: Trailing", title='Exit Variant', options=["Variant 1: Trailing", "Variant 2: Reversal"])
+
+// Trailing Settings (for Variant 1)
+trailingActivation = input.float(1.0, title='Trailing Activation (%)', minval=0.0, step=0.1)
+trailingOffset = input.float(1.5, title='Trailing Offset (%)', minval=0.0, step=0.1)
+
+// —————————————————————————————————————————————————————————————————————
+// 6) ENTRY & EXIT LOGIC (FIXED: използва close[1] за trailing)
+// —————————————————————————————————————————————————————————————————————
+
+// Hull-Only Signals (потвърдени сигнали)
+longSignal = longHullCrossover and timeInRange and barstate.isconfirmed
+shortSignal = shortHullCrossover and timeInRange and barstate.isconfirmed
+
+// === VARIANT 1: Trailing TP ===
+if variant == "Variant 1: Trailing"
+    // Long Entry
+    if longSignal and strategy.position_size <= 0
+        strategy.close('Short', comment='Close Short on Long Hull')
+        strategy.entry('Long', strategy.long, comment='Long Hull Entry')
+        // FIXED: Използваме close[1] за trailing параметрите
+        strategy.exit('Exit Long', 'Long', stop = longStopLoss, trail_price = close[1] * (1 + trailingActivation / 100), trail_offset = close[1] * trailingOffset / 100)
+    
+    // Short Entry  
+    if shortSignal and strategy.position_size >= 0
+        strategy.close('Long', comment='Close Long on Short Hull')
+        strategy.entry('Short', strategy.short, comment='Short Hull Entry')
+        // FIXED: Използваме close[1] за trailing параметрите
+        strategy.exit('Exit Short', 'Short', stop = shortStopLoss, trail_price = close[1] * (1 - trailingActivation / 100), trail_offset = close[1] * trailingOffset / 100)
+
+// === VARIANT 2: Reversal Exit ===
+if variant == "Variant 2: Reversal"
+    // Long Entry
+    if longSignal and strategy.position_size <= 0
+        strategy.close('Short', comment='Close Short on Long Hull')
+        strategy.entry('Long', strategy.long, comment='Long Hull Entry')
+        strategy.exit('Exit Long', 'Long', stop = longStopLoss)
+    
+    // Short Entry
+    if shortSignal and strategy.position_size >= 0
+        strategy.close('Long', comment='Close Long on Short Hull')
+        strategy.entry('Short', strategy.short, comment='Short Hull Entry')
+        strategy.exit('Exit Short', 'Short', stop = shortStopLoss)
+    
+    // Reversal Close (opposite signal closes current)
+    if longSignal and strategy.position_size < 0
+        strategy.close('Short', comment='Reversal Close Short on Long Hull')
+    if shortSignal and strategy.position_size > 0
+        strategy.close('Long', comment='Reversal Close Long on Short Hull')
+
+// —————————————————————————————————————————————————————————————————————
+// 7) PLOTS (показваме сигналите с 1 бар закъснение за точност)
+// —————————————————————————————————————————————————————————————————————
+plotshape(longHullCrossover[1], title='Long Hull Crossover', location=location.belowbar, color=color.green, style=shape.labelup, text="Hull Long", size=size.small)
+plotshape(shortHullCrossover[1], title='Short Hull Crossover', location=location.abovebar, color=color.red, style=shape.labeldown, text="Hull Short", size=size.small)

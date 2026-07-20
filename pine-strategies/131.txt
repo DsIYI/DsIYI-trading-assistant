@@ -1,0 +1,201 @@
+//@version=5
+strategy("Volume-Body Imbalance Strategy", 
+         overlay=true, 
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=100,
+         commission_type=strategy.commission.percent,
+         commission_value=0.055)
+
+//══════════════════════════════════════════════════════════════════════════════
+// BACKTESTING WINDOW
+//══════════════════════════════════════════════════════════════════════════════
+g_time = "Backtesting Period"
+FromMonth = input.int(1, 'From Month', minval=1, maxval=12, group=g_time)
+FromDay   = input.int(1, 'From Day', minval=1, maxval=31, group=g_time)
+FromYear  = input.int(2024, 'From Year', minval=2020, group=g_time)
+ToMonth   = input.int(12, 'To Month', minval=1, maxval=12, group=g_time)
+ToDay     = input.int(31, 'To Day', minval=1, maxval=31, group=g_time)
+ToYear    = input.int(2025, 'To Year', minval=2020, group=g_time)
+
+start  = timestamp(FromYear, FromMonth, FromDay, 0, 0)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+inWindow = time >= start and time <= finish
+
+//══════════════════════════════════════════════════════════════════════════════
+// SIGNAL DETECTION
+//══════════════════════════════════════════════════════════════════════════════
+g_signal = "Signal Detection"
+lookbackBars = input.int(20, "Lookback Bars", minval=5, maxval=200, group=g_signal)
+divergenceThreshold = input.float(0.7, "Imbalance Threshold", minval=0.3, maxval=1.0, step=0.1, group=g_signal)
+smoothing = input.int(3, "Smoothing Period", minval=1, maxval=10, group=g_signal)
+
+//══════════════════════════════════════════════════════════════════════════════
+// EXIT SETTINGS
+//══════════════════════════════════════════════════════════════════════════════
+g_exit = "Exit Settings"
+exitMethod = input.string("Both", "Exit Method", options=["Reversal Only", "Trailing Only", "Both"], group=g_exit)
+
+trailingActivationBars = input.int(5, "Activate Trailing After (bars)", minval=1, maxval=100, group=g_exit)
+trailingStopPercent = input.float(2.0, "Trailing Stop %", minval=0.5, maxval=10, step=0.1, group=g_exit)
+
+useStopLoss = input.bool(true, "Enable Stop-Loss?", group=g_exit)
+stopLossPercent = input.float(3.0, "Stop-Loss %", minval=0.5, maxval=20, step=0.1, group=g_exit)
+
+//══════════════════════════════════════════════════════════════════════════════
+// CALCULATIONS
+//══════════════════════════════════════════════════════════════════════════════
+
+// Body Size
+bodySize = math.abs(close - open)
+bodySizeSmooth = ta.sma(bodySize, smoothing)
+
+// Volume
+volumeSmooth = ta.sma(volume, smoothing)
+
+// Correlation
+correlation = ta.correlation(volumeSmooth, bodySizeSmooth, lookbackBars)
+
+// Imbalance
+imbalance = correlation < -divergenceThreshold and volumeSmooth > ta.sma(volumeSmooth, lookbackBars)
+
+// Price trend
+priceUp = close > ta.sma(close, lookbackBars)
+priceDown = close < ta.sma(close, lookbackBars)
+
+// Signals
+bullishSignal = imbalance and priceDown
+bearishSignal = imbalance and priceUp
+
+//══════════════════════════════════════════════════════════════════════════════
+// POSITION TRACKING
+//══════════════════════════════════════════════════════════════════════════════
+var int barsInTrade = 0
+var float entryPrice = na
+
+isLong = strategy.position_size > 0
+isShort = strategy.position_size < 0
+isFlat = strategy.position_size == 0
+
+if not isFlat
+    barsInTrade += 1
+else
+    barsInTrade := 0
+
+trailingActive = barsInTrade >= trailingActivationBars
+
+//══════════════════════════════════════════════════════════════════════════════
+// ENTRY LOGIC
+//══════════════════════════════════════════════════════════════════════════════
+
+if bullishSignal and isFlat and inWindow
+    entryPrice := close
+    strategy.entry("LONG", strategy.long, comment="LONG")
+    
+    // Immediate exit setup with SL
+    if useStopLoss
+        longSL = entryPrice * (1 - stopLossPercent / 100)
+        strategy.exit("SL Long", "LONG", stop=longSL)
+
+if bearishSignal and isFlat and inWindow
+    entryPrice := close
+    strategy.entry("SHORT", strategy.short, comment="SHORT")
+    
+    // Immediate exit setup with SL
+    if useStopLoss
+        shortSL = entryPrice * (1 + stopLossPercent / 100)
+        strategy.exit("SL Short", "SHORT", stop=shortSL)
+
+//══════════════════════════════════════════════════════════════════════════════
+// EXIT LOGIC
+//══════════════════════════════════════════════════════════════════════════════
+
+// Method 1: Reversal Exit
+if exitMethod == "Reversal Only" or exitMethod == "Both"
+    if isLong and bearishSignal
+        strategy.close("LONG", comment="Reversal Exit")
+    
+    if isShort and bullishSignal
+        strategy.close("SHORT", comment="Reversal Exit")
+
+// Method 2: Trailing Stop Exit (после активиране)
+if (exitMethod == "Trailing Only" or exitMethod == "Both") and trailingActive
+    if isLong
+        trailPrice = high
+        trailOffset = entryPrice * (trailingStopPercent / 100)
+        if useStopLoss
+            longSL = entryPrice * (1 - stopLossPercent / 100)
+            strategy.exit("Trail Long", "LONG", 
+                         stop=longSL,
+                         trail_price=trailPrice, 
+                         trail_offset=trailOffset,
+                         comment="Trailing Exit")
+        else
+            strategy.exit("Trail Long", "LONG", 
+                         trail_price=trailPrice, 
+                         trail_offset=trailOffset,
+                         comment="Trailing Exit")
+    
+    if isShort
+        trailPrice = low
+        trailOffset = entryPrice * (trailingStopPercent / 100)
+        if useStopLoss
+            shortSL = entryPrice * (1 + stopLossPercent / 100)
+            strategy.exit("Trail Short", "SHORT", 
+                         stop=shortSL,
+                         trail_price=trailPrice, 
+                         trail_offset=trailOffset,
+                         comment="Trailing Exit")
+        else
+            strategy.exit("Trail Short", "SHORT", 
+                         trail_price=trailPrice, 
+                         trail_offset=trailOffset,
+                         comment="Trailing Exit")
+
+//══════════════════════════════════════════════════════════════════════════════
+// VISUALIZATION
+//══════════════════════════════════════════════════════════════════════════════
+
+ema20 = ta.ema(close, 20)
+plot(ema20, "EMA 20", color.new(color.blue, 50), 2)
+
+plotshape(bullishSignal, "Buy", shape.triangleup, location.belowbar, 
+         color.new(color.lime, 0), size=size.normal, text="BUY")
+plotshape(bearishSignal, "Sell", shape.triangledown, location.abovebar, 
+         color.new(color.red, 0), size=size.normal, text="SELL")
+
+bgcolor(isLong ? color.new(color.green, 95) : isShort ? color.new(color.red, 95) : na)
+
+plotshape(trailingActive and not isFlat, "Trailing Active", 
+         shape.circle, location.absolute, 
+         color.new(color.orange, 0), size=size.tiny)
+
+// Info panel
+var table strategyTable = table.new(position.top_right, 2, 6, border_width=1)
+
+if barstate.islast
+    table.cell(strategyTable, 0, 0, "Metric", bgcolor=color.gray, text_color=color.white)
+    table.cell(strategyTable, 1, 0, "Value", bgcolor=color.gray, text_color=color.white)
+    
+    table.cell(strategyTable, 0, 1, "Position", text_color=color.white)
+    posText = isLong ? "LONG" : isShort ? "SHORT" : "FLAT"
+    table.cell(strategyTable, 1, 1, posText, 
+              text_color=isLong ? color.lime : isShort ? color.red : color.gray)
+    
+    table.cell(strategyTable, 0, 2, "Bars in Trade", text_color=color.white)
+    table.cell(strategyTable, 1, 2, str.tostring(barsInTrade), text_color=color.white)
+    
+    table.cell(strategyTable, 0, 3, "Trailing Active", text_color=color.white)
+    table.cell(strategyTable, 1, 3, trailingActive ? "YES" : "NO", 
+              text_color=trailingActive ? color.lime : color.gray)
+    
+    table.cell(strategyTable, 0, 4, "Correlation", text_color=color.white)
+    corrColor = correlation < -divergenceThreshold ? color.red : color.green
+    table.cell(strategyTable, 1, 4, str.tostring(correlation, "#.##"), text_color=corrColor)
+    
+    table.cell(strategyTable, 0, 5, "Win Rate", text_color=color.white)
+    winRate = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0
+    table.cell(strategyTable, 1, 5, str.tostring(winRate, "#.#") + "%", 
+              text_color=winRate > 50 ? color.lime : color.red)
+
+alertcondition(bullishSignal, "Long Entry", "LONG Signal")
+alertcondition(bearishSignal, "Short Entry", "SHORT Signal")

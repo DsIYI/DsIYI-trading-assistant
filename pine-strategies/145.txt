@@ -1,0 +1,94 @@
+//@version=6
+strategy(title="Enhanced BB Breakout Strategy", shorttitle="Enhanced BB", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_order_fills=false, calc_on_every_tick=false, process_orders_on_close=true)
+
+// === BACKTEST RANGE ===
+fromDate = input.time(timestamp("2024-01-01 00:00 +0000"), "From Date")
+toDate = input.time(timestamp("2030-01-01 00:00 +0000"), "To Date")
+inDateRange = (time >= fromDate and time <= toDate)
+
+// === DELAY FILTERS ===
+delay_group = "Delay Filters"
+delay_type = input.string("Bars", title="Delay Type", options=["Bars", "Seconds"], group=delay_group)
+delay_bars = input.int(5, title="Min Bars Between Same-Direction Trades", minval=0, group=delay_group)
+delay_seconds = input.int(50, title="Min Seconds Between Same-Direction Trades", minval=1, group=delay_group)
+loss_delay_bars = input.int(5, title="Bars to Wait After Loss", minval=0, group=delay_group)
+loss_delay_seconds = input.int(50, title="Seconds to Wait After Loss", minval=1, group=delay_group)
+
+// === BOLLINGER BAND SETTINGS ===
+length = input.int(100, title="BB Length", minval=1)
+mult = input.float(1.5, title="BB StdDev", step=0.1)
+basis = ta.ema(close, length)
+dev = mult * ta.stdev(close, length)
+upper = basis + dev
+lower = basis - dev
+
+// === EMA & SAR FILTERS ===
+useEMA = input.bool(true, title="Enable EMA Filter")
+emaPeriod = input.int(100, title="EMA Period")
+ema = ta.ema(close, emaPeriod)
+
+useSAR = input.bool(true, title="Enable Parabolic SAR")
+sarStart = input.float(0.1, title="SAR Start", step=0.1)
+sarStep = input.float(0.3, title="SAR Step", step=0.1)
+sarMax = input.float(1.0, title="SAR Max", step=0.1)
+sar = ta.sar(sarStart * 0.01, sarStep * 0.01, sarMax * 0.1)
+
+// === STRATEGY CONTROLS ===
+sl_percent = input.float(1.0, title="Stop-Loss %", step=0.001)
+tp_enabled = input.bool(false, title="Enable Take-Profit")
+tp_percent = input.float(2.0, title="Take-Profit %", step=0.1)
+max_drawdown = input.float(5.0, title="Max Drawdown %", step=0.1)
+
+// === COOLDOWN CONTROL ===
+cooldownSec = input.int(30, "Cooldown Period (seconds)", minval=1)
+timeNow = request.security(syminfo.tickerid, "1S", time)
+var int lastTradeTime = na
+canTrade = na(lastTradeTime) or (timeNow - lastTradeTime >= cooldownSec * 1000)
+
+// === MAX DRAWDOWN CONTROL ===
+var float peakEquity = strategy.equity
+drawdown = (peakEquity - strategy.equity) / peakEquity * 100
+if strategy.equity > peakEquity
+    peakEquity := strategy.equity
+maxDrawdownReached = drawdown >= max_drawdown
+
+// === POSITION CONDITIONS ===
+longCondition = close > upper and (not useEMA or close > ema) and (not useSAR or close > sar)
+shortCondition = close < lower and (not useEMA or close < ema) and (not useSAR or close < sar)
+
+// === STOP & TP PRICING ===
+sl_long = close * (1 - sl_percent / 100)
+sl_short = close * (1 + sl_percent / 100)
+tp_long = close * (1 + tp_percent / 100)
+tp_short = close * (1 - tp_percent / 100)
+
+// === STRATEGY LOGIC ===
+var int tradeCount = 0
+var int lastTradeDir = na // 1 for long; -1 for short
+
+if inDateRange and canTrade and not maxDrawdownReached
+    // Count losses
+    if (strategy.wintrades == 0 and strategy.losstrades > 0)
+        tradeCount := tradeCount + 1
+
+    // Long Entry
+    if longCondition and (na(lastTradeDir) or (lastTradeDir == -1 and tradeCount >= loss_delay_bars))
+        strategy.entry("Long", strategy.long)
+        if tp_enabled
+            strategy.exit("TP/SL Long", from_entry="Long", stop=sl_long, limit=tp_long)
+        else
+            strategy.exit("SL Only Long", from_entry="Long", stop=sl_long)
+        lastTradeTime := timeNow
+        lastTradeDir := 1
+        tradeCount := 0
+
+    // Short Entry
+    if shortCondition and (na(lastTradeDir) or (lastTradeDir == 1 and tradeCount >= loss_delay_bars))
+        strategy.entry("Short", strategy.short)
+        if tp_enabled
+            strategy.exit("TP/SL Short", from_entry="Short", stop=sl_short, limit=tp_short)
+        else
+            strategy.exit("SL Only Short", from_entry="Short", stop=sl_short)
+        lastTradeTime := timeNow
+        lastTradeDir := -1
+        tradeCount := 0

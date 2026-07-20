@@ -1,0 +1,33 @@
+//@version=5
+strategy("Divergence Based Trading Strategy with Full Indicator Capabilities", overlay=true, max_bars_back=1000)
+
+// Time-based inputs
+FromMonth = input.int(4, title='From Month', minval=1, maxval=12)
+FromDay = input.int(8, title='From Day', minval=1, maxval=31)
+FromYear = input.int(2024, title='From Year', minval=999)
+ToMonth = input.int(1, title='To Month', minval=1, maxval=12)
+ToDay = input.int(1, title='To Day', minval=1, maxval=31)
+ToYear = input.int(9999, title='To Year', minval=999)
+start = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+
+// Trading delay settings, declared before usage
+ph_delay = input.int(2, title='Delay for Pivot High (in bars)', minval=1)
+pl_delay = input.int(2, title='Delay for Pivot Low (in bars)', minval=1)
+
+// Declaration of divergence detection variables, initialized here to ensure they are recognized when used
+var bool pos_reg_div_detected = false
+var bool neg_reg_div_detected = false
+var bool pos_hid_div_detected = false
+var bool neg_hid_div_detected = false
+
+// Check time window
+if (time >= start and time <= finish)
+    // Check for pivot highs and pivot lows within the specified delay
+    float ph = ta.pivothigh(close, 10, 10)
+    float pl = ta.pivotlow(close, 10, 10)
+    if ph and (bar_index - ta.valuewhen(ph, bar_index, 0) >= ph_delay)
+        strategy.entry("Sell", strategy.short, comment="Sell based on pivot high delay")
+
+    if pl and (bar_index - ta.valuewhen(pl, bar_index, 0) >= pl_delay)
+        strategy.entry("Buy", strategy.long, comment="Buy based on pivot low delay")

@@ -1,0 +1,152 @@
+StrategyName = 'BEST Engulfing + MA'
+ShortStrategyName = 'BEST Engulfing + MA'
+
+strategy(title = StrategyName, shorttitle = ShortStrategyName, overlay = true, pyramiding = 2, default_qty_value = 500, precision = 7, currency = currency.USD, commission_value = 0.2, commission_type = strategy.commission.percent, initial_capital = 10000)
+
+includeEngulfing = true
+
+includeMA = true
+source_ma = input(title = 'Source Price vs MA', defval = close)
+typeofMA = input.string(title = 'Type of MA', defval = 'SMA', options = ['RMA', 'SMA', 'EMA', 'WMA', 'VWMA', 'SMMA', 'KMA', 'TMA', 'HullMA', 'DEMA', 'TEMA'])
+length_ma = input(32, title = 'MA Length')
+
+// ---------- Candle components and states
+GreenCandle = close > open
+RedCandle = close < open
+NoBody = close == open
+Body = math.abs(close - open)
+
+// bullish conditions
+isBullishEngulfing1 = math.max(close[1], open[1]) < math.max(close, open) and math.min(close[1], open[1]) > math.min(close, open) and Body > Body[1] and GreenCandle and RedCandle[1]
+isBullishEngulfing2 = math.max(close[1], open[1]) < math.max(close, open) and math.min(close[1], open[1]) <= math.min(close, open) and Body > Body[1] and GreenCandle and RedCandle[1]
+
+// bearish conditions
+isBearishEngulfing1 = math.max(close[1], open[1]) < math.max(close, open) and math.min(close[1], open[1]) > math.min(close, open) and Body > Body[1] and RedCandle and GreenCandle[1]
+isBearishEngulfing2 = math.max(close[1], open[1]) >= math.max(close, open) and math.min(close[1], open[1]) > math.min(close, open) and Body > Body[1] and RedCandle and GreenCandle[1]
+
+// consolidation of conditions
+isBullishEngulfing = isBullishEngulfing1 or isBullishEngulfing2
+isBearishEngulfing = isBearishEngulfing1 or isBearishEngulfing2
+
+Engulf_curr = 0 - ta.barssince(isBearishEngulfing) + ta.barssince(isBullishEngulfing)
+Engulf_Buy = Engulf_curr < 0
+Engulf_Sell = Engulf_curr > 0
+
+// Price vs MA
+smma(src, len) =>
+    smma = 0.0
+    smma := na(smma[1]) ? ta.sma(src, len) : (smma[1] * (len - 1) + src) / len
+    smma
+
+// Function to get the selected moving average
+ma(source, length, ma_type) =>
+    ma_type == "SMA" ? ta.sma(source, length) :
+    ma_type == "EMA" ? ta.ema(source, length) :
+    ma_type == "RMA" ? ta.rma(source, length) :
+    ma_type == "WMA" ? ta.wma(source, length) :
+    ma_type == "VWMA" ? ta.vwma(source, length) :
+    ma_type == "SMMA" ? smma(source, length) :
+    ma_type == "KMA" ? ta.kama(source, length) :
+    ma_type == "TMA" ? ta.tma(source, length) :
+    ma_type == "HullMA" ? ta.hma(source, length) :
+    ma_type == "DEMA" ? ta.dema(source, length) :
+    ma_type == "TEMA" ? ta.tema(source, length) :
+    na
+
+maCalc = ma(source_ma, length_ma, typeofMA)
+
+plot(maCalc, color = #006400FF, title = 'MA breakout', linewidth = 3)
+
+macrossover = ta.crossover(source_ma, maCalc)
+macrossunder = ta.crossunder(source_ma, maCalc)
+
+since_ma_buy = ta.barssince(macrossover)
+since_ma_sell = ta.barssince(macrossunder)
+macross_curr = 0 - since_ma_sell + since_ma_buy
+bullish_MA_cond = macross_curr < 0
+bearish_MA_cond = macross_curr > 0
+
+// Combining conditions with typecast to boolean
+posUp = (Engulf_Buy and bullish_MA_cond) ? true : false
+posDn = (Engulf_Sell and bearish_MA_cond) ? true : false
+
+conditionUP = posUp and posUp[1] == false
+conditionDN = posDn and posDn[1] == false
+
+sinceUP = ta.barssince(conditionUP)
+sinceDN = ta.barssince(conditionDN)
+
+// primary-first signal of the trend
+nUP = ta.crossunder(sinceUP, sinceDN)
+nDN = ta.crossover(sinceUP, sinceDN)
+
+// and the following secondary signals
+
+// save of the primary signal
+sinceNUP = ta.barssince(nUP)
+sinceNDN = ta.barssince(nDN)
+
+buy_trend = sinceNDN > sinceNUP
+sell_trend = sinceNDN < sinceNUP
+
+// Engulfing by
+barcolor(nUP ? color.orange : na, title = 'Bullish condition')
+barcolor(nDN ? color.yellow : na, title = 'Bearish condition')
+
+isLong = nUP
+isShort = nDN
+
+long_entry_price = ta.valuewhen(nUP, close, 0)
+short_entry_price = ta.valuewhen(nDN, close, 0)
+
+longClose = close[1] < maCalc
+shortClose = close[1] > maCalc
+
+///////////////////////////////////////////////
+//* Backtesting Period Selector | Component *//
+///////////////////////////////////////////////
+
+StartYear = input.int(2017, 'Backtest Start Year', minval = 1980)
+StartMonth = input.int(1, 'Backtest Start Month', minval = 1, maxval = 12)
+StartDay = input.int(1, 'Backtest Start Day', minval = 1, maxval = 31)
+testPeriodStart = timestamp(StartYear, StartMonth, StartDay, 0, 0)
+
+StopYear = input.int(2020, 'Backtest Stop Year', minval = 1980)
+StopMonth = input.int(12, 'Backtest Stop Month', minval = 1, maxval = 12)
+StopDay = input.int(31, 'Backtest Stop Day', minval = 1, maxval = 31)
+testPeriodStop = timestamp(StopYear, StopMonth, StopDay, 0, 0)
+
+testPeriod() =>
+    time >= testPeriodStart and time <= testPeriodStop ? true : false
+
+//////////////////////////
+//* Profit Component *//
+//////////////////////////
+
+input_tp_pips = input.int(2000, 'Backtest Profit Goal (in USD)', minval = 0)
+input_sl_pips = input.int(200, 'Backtest STOP Goal (in USD)', minval = 0)
+
+tp = buy_trend ? long_entry_price + input_tp_pips : short_entry_price - input_tp_pips
+sl = buy_trend ? long_entry_price - input_sl_pips : short_entry_price + input_sl_pips
+
+long_TP_exit = buy_trend and high >= tp
+short_TP_exit = sell_trend and low <= tp
+
+plot(tp, title = 'TP', style = plot.style_circles, linewidth = 3, color = color.new(color.blue, 0))
+plot(sl, title = 'SL', style = plot.style_circles, linewidth = 3, color = color.new(color.red, 0))
+
+if testPeriod()
+    if isLong
+        strategy.entry('Long', strategy.long)
+    if longClose
+        strategy.close('Long')
+    if buy_trend
+        strategy.exit('XL', 'Long', limit = tp, stop = sl)
+
+if testPeriod()
+    if isShort
+        strategy.entry('Short', strategy.short)
+    if shortClose
+        strategy.close('Short')
+    if sell_trend
+        strategy.exit('XS', 'Short', limit = tp, stop = sl)

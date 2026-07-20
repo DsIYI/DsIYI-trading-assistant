@@ -1,0 +1,144 @@
+//@version=6
+strategy('Optimized Supertrend for MYXUSDT.P 1s [No Repaint, HTF Enabled]', overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_every_tick=false, dynamic_requests=false)
+
+// === INPUTS (Optimized for MYXUSDT.P - Dynamic Crypto 1s TF, Loose Filters)
+htf_tf = input.timeframe('1m', title='HTF Trend Filter Timeframe')  // 1m for quick filter on 1s
+htf_enabled = input.bool(true, title='Enable HTF Supertrend Filter?')
+Periods       = input.int(title='ATR Period', defval=10)
+src           = input.source(hl2, title='Source')
+Multiplier    = input.float(title='ATR Multiplier', step=0.1, defval=1.5)  // Lower for more signals
+changeATR     = input.bool(title='Change ATR Calculation Method?', defval=true)
+ttp_percent   = input.float(title='Trailing Take-Profit %', defval=0.3, step=0.1)  // Tight for 1s
+sl_percent    = input.float(title='Stop-Loss %', defval=0.3, step=0.1)
+tp1_rr = input.float(title='TP1 Risk:Reward', defval=1.0, step=0.1)
+tp2_rr = input.float(title='TP2 Risk:Reward', defval=1.5, step=0.1)
+tradeCooldownBars = input.int(title='Min Bars Between Trades', defval=3, minval=0, maxval=300)  // Short for frequent signals
+
+// === BACKTEST RANGE (Extended for more data)
+fromYear  = input.int(2023, 'From Year', minval=1900, maxval=2100)
+fromMonth = input.int(1, 'From Month', minval=1, maxval=12)
+fromDay   = input.int(1, 'From Day', minval=1, maxval=31)
+toYear    = input.int(2026, 'To Year', minval=1900, maxval=2100)
+toMonth   = input.int(12, 'To Month', minval=1, maxval=12)
+toDay     = input.int(31, 'To Day', minval=1, maxval=31)
+startTime = timestamp(fromYear, fromMonth, fromDay, 0, 0)
+endTime   = timestamp(toYear, toMonth, toDay, 23, 59)
+inDateRange = (time >= startTime and time <= endTime)
+
+// === SUPERTREND CALCULATION (Local TF)
+atr2 = ta.sma(ta.tr, Periods)
+atr  = changeATR ? ta.atr(Periods) : atr2
+up   = src - Multiplier * atr
+up1  = nz(up[1], up)
+up   := close[1] > up1 ? math.max(up, up1) : up
+dn   = src + Multiplier * atr
+dn1  = nz(dn[1], dn)
+dn   := close[1] < dn1 ? math.min(dn, dn1) : dn
+
+var int trend = na
+trend := na(trend[1]) ? (close > dn1 ? 1 : -1) : trend
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+
+rawBuy  = trend == 1 and trend[1] == -1 and barstate.isconfirmed
+rawSell = trend == -1 and trend[1] == 1 and barstate.isconfirmed
+
+// === HTF SUPERTREND CALCULATION (Non-Repaint)
+f_supertrend(_src, _periods, _multiplier, _changeATR) =>
+    _atr2 = ta.sma(ta.tr, _periods)
+    _atr  = _changeATR ? ta.atr(_periods) : _atr2
+    _up   = _src - _multiplier * _atr
+    _up1  = nz(_up[1], _up)
+    _up   := close[1] > _up1 ? math.max(_up, _up1) : _up
+    _dn   = _src + _multiplier * _atr
+    _dn1  = nz(_dn[1], _dn)
+    _dn   := close[1] < _dn1 ? math.min(_dn, _dn1) : _dn
+    var int _trend = na
+    _trend := na(_trend[1]) ? (close > _dn1 ? 1 : -1) : _trend
+    _trend := _trend == -1 and close > _dn1 ? 1 : _trend == 1 and close < _up1 ? -1 : _trend
+    _trend
+
+// Static request.security call (outside if)
+htfTrend = request.security(syminfo.tickerid, htf_tf, f_supertrend(hl2, Periods, Multiplier, changeATR)[1], lookahead=barmerge.lookahead_off, gaps=barmerge.gaps_on)
+htfPass = not htf_enabled or (htfTrend == 1 and rawBuy) or (htfTrend == -1 and rawSell)
+
+// === TRADE COOLDOWN
+var int lastTradeBar = na
+canTrade = na(lastTradeBar) or (bar_index - lastTradeBar > tradeCooldownBars)
+
+// === SIGNAL CONFIRM (Immediate, No Countdown)
+buyConfirmed = rawBuy and htfPass and canTrade
+sellConfirmed = rawSell and htfPass and canTrade
+
+// === POSITION STATE
+var float entryPrice = na
+var float highestHigh = na
+var float lowestLow = na
+var bool inLong = false
+var bool inShort = false
+
+if (buyConfirmed and inDateRange)
+    strategy.entry('Buy Long', strategy.long)
+    entryPrice := close
+    highestHigh := close
+    inLong := true
+    inShort := false
+    lastTradeBar := bar_index
+    alert('ENTER LONG: {"price":' + str.tostring(close) + ', "atr":' + str.tostring(atr) + '}', alert.freq_once_per_bar_close)
+
+if (sellConfirmed and inDateRange)
+    strategy.entry('Buy Short', strategy.short)
+    entryPrice := close
+    lowestLow := close
+    inShort := true
+    inLong := false
+    lastTradeBar := bar_index
+    alert('ENTER SHORT: {"price":' + str.tostring(close) + ', "atr":' + str.tostring(atr) + '}', alert.freq_once_per_bar_close)
+
+highestHigh := inLong ? math.max(highestHigh, close) : highestHigh
+lowestLow := inShort ? math.min(lowestLow, close) : lowestLow
+
+// Multi TP levels
+slLongLevel = entryPrice * (1 - sl_percent / 100)
+tpLongLevelTrailing = highestHigh * (1 - ttp_percent / 100)
+tp1LongLevel = entryPrice + (entryPrice - slLongLevel) * tp1_rr
+tp2LongLevel = entryPrice + (entryPrice - slLongLevel) * tp2_rr
+
+slShortLevel = entryPrice * (1 + sl_percent / 100)
+tpShortLevelTrailing = lowestLow * (1 + ttp_percent / 100)
+tp1ShortLevel = entryPrice - (slShortLevel - entryPrice) * tp1_rr
+tp2ShortLevel = entryPrice - (slShortLevel - entryPrice) * tp2_rr
+
+// Exit conditions (Immediate)
+exitLongConfirmed = inLong and (close <= tpLongLevelTrailing or close <= slLongLevel or close >= tp2LongLevel)
+exitShortConfirmed = inShort and (close >= tpShortLevelTrailing or close >= slShortLevel or close <= tp2ShortLevel)
+
+if exitLongConfirmed
+    strategy.close('Buy Long')
+    inLong := false
+    lastTradeBar := bar_index
+    alert('EXIT LONG: {"close":' + str.tostring(close) + ',"sl":' + str.tostring(slLongLevel) + ',"tp_trail":' + str.tostring(tpLongLevelTrailing) + ',"tp1":' + str.tostring(tp1LongLevel) + ',"tp2":' + str.tostring(tp2LongLevel) + '}', alert.freq_once_per_bar_close)
+
+if exitShortConfirmed
+    strategy.close('Buy Short')
+    inShort := false
+    lastTradeBar := bar_index
+    alert('EXIT SHORT: {"close":' + str.tostring(close) + ',"sl":' + str.tostring(slShortLevel) + ',"tp_trail":' + str.tostring(tpShortLevelTrailing) + ',"tp1":' + str.tostring(tp1ShortLevel) + ',"tp2":' + str.tostring(tp2ShortLevel) + '}', alert.freq_once_per_bar_close)
+
+// === PLOTS
+plotshape(rawBuy, title='Raw Buy', location=location.belowbar, color=color.lime, style=shape.circle, size=size.tiny)  // Debug raw
+plotshape(rawSell, title='Raw Sell', location=location.abovebar, color=color.maroon, style=shape.circle, size=size.tiny)
+plotshape(buyConfirmed, title='Buy Signal', location=location.belowbar, color=color.green, style=shape.labelup, text='BUY')
+plotshape(sellConfirmed, title='Sell Signal', location=location.abovebar, color=color.red, style=shape.labeldown, text='SELL')
+plot(inLong ? tpLongLevelTrailing : na, title='TP Trail Long', color=color.green)
+plot(inLong ? tp1LongLevel : na, title='TP1 Long', color=color.lime)
+plot(inLong ? tp2LongLevel : na, title='TP2 Long', color=color.teal)
+plot(inLong ? slLongLevel : na, title='SL Long', color=color.red)
+plot(inShort ? tpShortLevelTrailing : na, title='TP Trail Short', color=color.green)
+plot(inShort ? tp1ShortLevel : na, title='TP1 Short', color=color.lime)
+plot(inShort ? tp2ShortLevel : na, title='TP2 Short', color=color.teal)
+plot(inShort ? slShortLevel : na, title='SL Short', color=color.red)
+
+// === DEBUG PLOTS
+plot(htfPass ? 1 : na, title='HTF Filter Pass', color=color.orange, style=plot.style_columns)
+plot(canTrade ? 1 : na, title='Can Trade', color=color.aqua, style=plot.style_columns)
+plot(inDateRange ? 1 : na, title='In Backtest Range', color=color.fuchsia, style=plot.style_columns)

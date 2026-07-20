@@ -1,0 +1,213 @@
+//@version=5
+strategy('Pivot Points Swing Strategy [NON-REPAINT]', overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.percent, commission_value=0.1, process_orders_on_close=true, pyramiding=0)
+
+// ====== PIVOT DETECTION SETTINGS ======
+group1 = "═══════════ Pivot Detection ═══════════"
+pivotLength = input.int(5, "Pivot Lookback", minval=0, maxval=15, group=group1)
+confirmPivot = input.bool(true, "Require Pivot Confirmation", group=group1)
+useStructureBreak = input.bool(true, "Use Structure Break", group=group1)
+structureLength = input.int(10, "Structure Length", minval=5, maxval=20, group=group1)
+
+// ====== FILTERS ======
+group2 = "═══════════ Filters ═══════════"
+useVolumeFilter = input.bool(true, "Use Volume Spike", group=group2)
+volumeThreshold = input.float(1.5, "Volume Threshold", minval=1.2, maxval=3.0, step=0.1, group=group2)
+
+useMomentumFilter = input.bool(true, "Use Momentum Filter", group=group2)
+rsiLength = input.int(14, "RSI Length", minval=5, maxval=30, group=group2)
+rsiOversold = input.float(35, "RSI Oversold", minval=20, maxval=40, group=group2)
+rsiOverbought = input.float(65, "RSI Overbought", minval=60, maxval=80, group=group2)
+
+useDivergence = input.bool(true, "Check for Divergence", group=group2)
+divLength = input.int(10, "Divergence Lookback", minval=5, maxval=20, group=group2)
+
+// ====== RISK & RE-ENTRY ======
+group3 = "═══════════ Risk & Re-Entry ═══════════"
+stopLossMode = input.string("Swing", "Stop Loss Mode", options=["Fixed", "ATR", "Swing"], group=group3)
+fixedStopPerc = input.float(0.5, "Fixed Stop %", minval=0.2, maxval=2.0, step=0.1, group=group3)
+atrMultiplier = input.float(1.0, "ATR Multiplier", minval=0.5, maxval=3.0, step=0.1, group=group3)
+swingOffset = input.float(0.1, "Swing Offset %", minval=0.05, maxval=0.5, step=0.05, group=group3)
+
+takeProfitRatio = input.float(2.0, "Risk:Reward Ratio", minval=1.0, maxval=5.0, step=0.1, group=group3)
+
+// Re-entry settings
+enableReEntry = input.bool(true, "Enable Re-Entry after SL", group=group3)
+maxReEntries = input.int(3, "Max Re-Entries", minval=1, maxval=5, group=group3)
+reEntryCooldown = input.int(2, "Cooldown Bars", minval=1, maxval=10, group=group3)
+
+// ====== BACKTEST PERIOD ======
+group4 = "═══════════ Backtest Period ═══════════"
+useBacktest = input.bool(true, "Use Backtest Period", group=group4)
+startDate = input.time(timestamp("2024-01-01"), "Start Date", group=group4)
+endDate = input.time(timestamp("2025-01-01"), "End Date", group=group4)
+
+inBacktest = not useBacktest or (time >= startDate and time <= endDate)
+
+// ====== PIVOT POINT DETECTION (NON-REPAINT) ======
+// Using confirmed pivot points
+pivotHigh = ta.pivothigh(high, pivotLength, pivotLength)
+pivotLow = ta.pivotlow(low, pivotLength, pivotLength)
+
+// Store pivot values (FIXED INITIALIZATION)
+var float lastPivotHigh = high[100]
+var float lastPivotLow = low[100]
+var int lastPivotHighBar = 0
+var int lastPivotLowBar = 0
+
+// Initialize with first available values if na
+if na(lastPivotHigh)
+    lastPivotHigh := high[pivotLength]
+if na(lastPivotLow)
+    lastPivotLow := low[pivotLength]
+
+if not na(pivotHigh)
+    lastPivotHigh := pivotHigh
+    lastPivotHighBar := bar_index - pivotLength
+
+if not na(pivotLow)
+    lastPivotLow := pivotLow
+    lastPivotLowBar := bar_index - pivotLength
+
+// ====== STRUCTURE BREAK DETECTION ======
+highestRecent = ta.highest(high[1], structureLength)
+lowestRecent = ta.lowest(low[1], structureLength)
+
+bullishBreak = close[1] > highestRecent[1] and not na(lastPivotLow)
+bearishBreak = close[1] < lowestRecent[1] and not na(lastPivotHigh)
+
+structureLong = not useStructureBreak or bullishBreak
+structureShort = not useStructureBreak or bearishBreak
+
+// ====== VOLUME ANALYSIS ======
+volMA = ta.sma(volume[1], 20)
+volumeSpike = volume[1] > volMA * volumeThreshold
+volumeOK = not useVolumeFilter or volumeSpike
+
+// ====== MOMENTUM & DIVERGENCE ======
+rsi = ta.rsi(close[1], rsiLength)
+
+// Check for pivot point with momentum
+momentumLong = not useMomentumFilter or (rsi[1] < rsiOversold and rsi > rsi[1])
+momentumShort = not useMomentumFilter or (rsi[1] > rsiOverbought and rsi < rsi[1])
+
+// Divergence detection
+bullishDiv = false
+bearishDiv = false
+
+if useDivergence
+    // Bullish divergence: price makes lower low, RSI makes higher low
+    priceLowerLow = low[1] < ta.lowest(low[2], divLength)
+    rsiHigherLow = rsi > ta.lowest(rsi[1], divLength)
+    bullishDiv := priceLowerLow and rsiHigherLow
+    
+    // Bearish divergence: price makes higher high, RSI makes lower high
+    priceHigherHigh = high[1] > ta.highest(high[2], divLength)
+    rsiLowerHigh = rsi < ta.highest(rsi[1], divLength)
+    bearishDiv := priceHigherHigh and rsiLowerHigh
+
+divLong = not useDivergence or bullishDiv
+divShort = not useDivergence or bearishDiv
+
+// ====== SWING POINT CONFIRMATION (FIXED) ======
+// Made less restrictive - increased tolerance to 2%
+nearPivotLow = not na(lastPivotLow) and math.abs(low[1] - lastPivotLow) / lastPivotLow * 100 < 2.0
+nearPivotHigh = not na(lastPivotHigh) and math.abs(high[1] - lastPivotHigh) / lastPivotHigh * 100 < 2.0
+
+// Long signal: price bounces from pivot low area
+longPivotSignal = nearPivotLow and close[1] > open[1] and low[1] > lastPivotLow * (1 - swingOffset/100)
+
+// Short signal: price rejects from pivot high area
+shortPivotSignal = nearPivotHigh and close[1] < open[1] and high[1] < lastPivotHigh * (1 + swingOffset/100)
+
+// ====== RE-ENTRY MANAGEMENT ======
+var int reEntryCount = 0
+var int lastExitBar = 0
+var bool trendContinues = false
+
+// Check if we can re-enter
+canReEnter = enableReEntry and reEntryCount < maxReEntries and (bar_index - lastExitBar) >= reEntryCooldown
+
+// Reset re-entry count on new trend
+if (longPivotSignal and not trendContinues) or (shortPivotSignal and not trendContinues)
+    reEntryCount := 0
+
+// ====== FINAL SIGNALS ======
+longSignal = (longPivotSignal or (canReEnter and trendContinues and close[1] > open[1])) and structureLong and volumeOK and momentumLong and inBacktest
+
+shortSignal = (shortPivotSignal or (canReEnter and trendContinues and close[1] < open[1])) and structureShort and volumeOK and momentumShort and inBacktest
+
+// ====== STOP LOSS CALCULATION ======
+atr = ta.atr(14)
+
+calculateStopLoss(isLong) =>
+    if stopLossMode == "Fixed"
+        isLong ? close[1] * (1 - fixedStopPerc/100) : close[1] * (1 + fixedStopPerc/100)
+    else if stopLossMode == "ATR"
+        isLong ? close[1] - atr * atrMultiplier : close[1] + atr * atrMultiplier
+    else // Swing mode
+        isLong ? lastPivotLow * (1 - swingOffset/100) : lastPivotHigh * (1 + swingOffset/100)
+
+// ====== STRATEGY EXECUTION ======
+if longSignal and strategy.position_size <= 0
+    if strategy.position_size < 0
+        strategy.close("Short")
+        
+    sl = calculateStopLoss(true)
+    tp = close[1] + (close[1] - sl) * takeProfitRatio
+    
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+    
+    if canReEnter
+        reEntryCount += 1
+    trendContinues := true
+
+if shortSignal and strategy.position_size >= 0
+    if strategy.position_size > 0
+        strategy.close("Long")
+        
+    sl = calculateStopLoss(false)
+    tp = close[1] - (sl - close[1]) * takeProfitRatio
+    
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+    
+    if canReEnter
+        reEntryCount += 1
+    trendContinues := true
+
+// Track exits for re-entry (FIXED)
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    lastExitBar := bar_index
+    // Check if exit was due to stop loss
+    if strategy.closedtrades > 0
+        lastProfit = strategy.closedtrades.profit(strategy.closedtrades - 1)
+        if lastProfit < 0
+            // Exit was a loss, keep trend active for re-entry
+            trendContinues := true
+        else
+            // Exit was profit, reset
+            trendContinues := false
+            reEntryCount := 0
+
+// ====== VISUAL ELEMENTS ======
+// Pivot Points
+plotshape(not na(pivotHigh), "Pivot High", location=location.abovebar, style=shape.triangledown, size=size.tiny, color=color.red, offset=-pivotLength)
+plotshape(not na(pivotLow), "Pivot Low", location=location.belowbar, style=shape.triangleup, size=size.tiny, color=color.green, offset=-pivotLength)
+
+// Pivot Levels
+plot(lastPivotHigh, "Last Pivot High", color=color.new(color.red, 70), linewidth=1, style=plot.style_stepline)
+plot(lastPivotLow, "Last Pivot Low", color=color.new(color.green, 70), linewidth=1, style=plot.style_stepline)
+
+// Signals
+plotshape(longSignal, "Long Signal", location=location.belowbar, style=shape.labelup, size=size.small, color=color.green, text="BUY")
+plotshape(shortSignal, "Short Signal", location=location.abovebar, style=shape.labeldown, size=size.small, color=color.red, text="SELL")
+
+// Re-entry markers
+plotshape(longSignal and canReEnter and reEntryCount > 0, "Re-Entry Long", location=location.belowbar, style=shape.circle, size=size.tiny, color=color.blue)
+plotshape(shortSignal and canReEnter and reEntryCount > 0, "Re-Entry Short", location=location.abovebar, style=shape.circle, size=size.tiny, color=color.orange)
+
+// Background
+bgcolor(not inBacktest ? color.new(color.gray, 90) : na)
+bgcolor(volumeSpike ? color.new(color.yellow, 95) : na)
+bgcolor(bullishDiv ? color.new(color.green, 95) : bearishDiv ? color.new(color.red, 95) : na)

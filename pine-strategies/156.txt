@@ -1,0 +1,129 @@
+//@version=6
+strategy('Heikin Ashi EMA v6 [Toggle TF + Reversible + Sideways Filter]', shorttitle = 'HAEMA', overlay = true, max_bars_back = 500, default_qty_value = 1000, initial_capital = 100000, currency = currency.EUR)
+
+// === INPUTS ===
+// Time window inputs
+FromMonth = input.int(defval = 1, title = 'From Month', minval = 1, maxval = 12)
+FromDay = input.int(defval = 1, title = 'From Day', minval = 1, maxval = 31)
+FromYear = input.int(defval = 2024, title = 'From Year', minval = 2024)
+ToMonth = input.int(defval = 12, title = 'To Month', minval = 1, maxval = 12)
+ToDay = input.int(defval = 31, title = 'To Day', minval = 1, maxval = 31)
+ToYear = input.int(defval = 2099, title = 'To Year', minval = 2024)
+
+start = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+inDateRange = (time >= start and time <= finish)
+
+// Settings
+useRepaintingLogic = input.bool(true, title = 'Use Repainting Logic (Faster but may repaint)')
+reversibleMode = input.bool(true, title = 'Reversible Mode (Immediate Entry After TP)')
+sloma = input.int(20, 'Slow EMA Period')
+Length = input.int(5, minval = 1)
+xPrice = input.source(hlc3, 'KAMA Source')
+Fastend = input.float(2.5, step = 0.5)
+Slowend = input.float(20)
+
+// Stop Loss
+stopLossPercent = input.float(0.001, title = 'Stop-Loss (%)', minval = 0.001, step = 0.001)
+useStopLoss = input.bool(true, title = 'Enable Stop-Loss')
+
+// Optional Timeframe Toggle
+useCustomTF = input.bool(true, title='Use Custom Heikin Ashi EMA Time Frame?')
+res1 = input.timeframe(title='Heikin Ashi EMA Time Frame', defval='D')
+testShift = input.int(0, title='Heikin Ashi EMA Shift')
+
+// Delay After Take-Profit
+entryDelaySeconds = input.int(5, title='Delay After Take-Profit (Seconds)', minval=1, maxval=99)
+var int lastTPTime = na
+currentTime = time
+delayPassed = na(lastTPTime) or (currentTime - lastTPTime >= entryDelaySeconds * 1000)
+
+// === KAMA Calculation ===
+xvnoise = math.abs(xPrice - xPrice[1])
+nfastend = 2 / (Fastend + 1)
+nslowend = 2 / (Slowend + 1)
+nsignal = math.abs(xPrice - xPrice[Length])
+nnoise = math.sum(xvnoise, Length)
+nefratio = nnoise != 0 ? nsignal / nnoise : 0
+nsmooth = math.pow(nefratio * (nfastend - nslowend) + nslowend, 2)
+prevAMA = nz(xPrice[1])
+nAMAn = prevAMA + nsmooth * (xPrice - prevAMA)
+
+// === Manual Heikin Ashi for Non-Repaint ===
+haClose_nr = (open + high + low + close) / 4
+var float haOpen_nr = na
+haOpen_nr := na(haOpen_nr[1]) ? (open + close) / 2 : (haOpen_nr[1] + haClose_nr[1]) / 2
+haHigh_nr = math.max(high, math.max(haOpen_nr, haClose_nr))
+haLow_nr = math.min(low, math.min(haOpen_nr, haClose_nr))
+haHLC3_nr = (haHigh_nr + haLow_nr + haClose_nr) / 3
+
+// === EMA Sources based on toggle
+fastSource = useRepaintingLogic ? request.security(ticker.heikinashi(syminfo.tickerid), useCustomTF ? res1 : timeframe.period, hlc3)[testShift] : haHLC3_nr
+slowSource = useRepaintingLogic ? request.security(ticker.heikinashi(syminfo.tickerid), useCustomTF ? res1 : timeframe.period, nAMAn)[testShift] : nAMAn
+
+fma = ta.ema(fastSource, 1)
+sma = ta.ema(slowSource, sloma)
+
+// === Signal Conditions
+longSignal = ta.crossover(fma, sma)
+shortSignal = ta.crossunder(fma, sma)
+
+// === Candle Color Logic (from HA)
+isRedCandle = fastSource < sma
+isGreenCandle = fastSource > sma
+
+// === Sideways Filter ===
+enableSidewaysFilter = input.bool(true, title='Enable "Do Not Trade in Sideways" Mode')
+sidewaysLookback = input.int(10, title='Sideways Detection Lookback (bars)', minval=2)
+sidewaysThreshold = input.float(1.0, title='Max Range % to Avoid Trades', minval=0.1, step=0.1)
+
+highestHigh = ta.highest(high, sidewaysLookback)
+lowestLow = ta.lowest(low, sidewaysLookback)
+rangePerc = 100 * (highestHigh - lowestLow) / lowestLow
+isSideways = enableSidewaysFilter and (rangePerc < sidewaysThreshold)
+
+bgcolor(isSideways ? color.new(color.orange, 85) : na, title='Sideways Market Background')
+
+// === Trade Conditions
+canBuy = longSignal and not isRedCandle and not isSideways
+canSell = shortSignal and not isGreenCandle and not isSideways
+
+// === Stop-Loss Levels
+longStop = strategy.position_avg_price * (1 - stopLossPercent / 100)
+shortStop = strategy.position_avg_price * (1 + stopLossPercent / 100)
+
+// === Plot MAs
+plot(fma, title = 'Fast MA', color = color.black)
+plot(sma, title = 'Slow EMA', color = color.red)
+
+// === Trade Execution with Delay ===
+if inDateRange and barstate.isconfirmed and delayPassed
+    if canBuy
+        if reversibleMode and strategy.position_size < 0
+            strategy.close('Sell', comment='TP Reversed to Long')
+            strategy.entry('Buy', strategy.long)
+            lastTPTime := time
+        else if strategy.position_size == 0
+            strategy.entry('Buy', strategy.long)
+
+    if canSell
+        if reversibleMode and strategy.position_size > 0
+            strategy.close('Buy', comment='TP Reversed to Short')
+            strategy.entry('Sell', strategy.short)
+            lastTPTime := time
+        else if strategy.position_size == 0
+            strategy.entry('Sell', strategy.short)
+
+    if useStopLoss
+        if strategy.position_size > 0 and close < longStop
+            strategy.close('Buy', comment='SL Hit')
+        if strategy.position_size < 0 and close > shortStop
+            strategy.close('Sell', comment='SL Hit')
+
+    if not reversibleMode
+        if strategy.position_size > 0 and shortSignal
+            strategy.close('Buy', comment='TP Opposed')
+            lastTPTime := time
+        if strategy.position_size < 0 and longSignal
+            strategy.close('Sell', comment='TP Opposed')
+            lastTPTime := time

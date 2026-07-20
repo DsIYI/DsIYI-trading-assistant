@@ -1,0 +1,131 @@
+//@version=6
+strategy(title="Fibonacci Buy Strategy (No Leverage, Perpetuals)", shorttitle="FibBuy_v6", overlay=true, pyramiding=50, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=1)
+
+//=====================================================================================
+// 🛠 USER INPUTS (Timing Selection)
+//=====================================================================================
+useStartTime = input.bool(true, "Use Start Time Filter?")
+startFromDaysAgo = input.int(0, "Start from Days Ago (set to 0 if using Hours)", minval=0)
+startFromHoursAgo = input.int(0, "Start from Hours Ago (set to 0 if using Days)", minval=0)
+
+// 🟢 Order Sizes
+fibQty_236 = input.float(25, "Fib 0.236 Qty (%)", group="Fib Order Sizes", minval=0.1, step=0.1)
+fibQty_382 = input.float(25, "Fib 0.382 Qty (%)", group="Fib Order Sizes", minval=0.1, step=0.1)
+fibQty_50  = input.float(25, "Fib 0.50 Qty (%)", group="Fib Order Sizes", minval=0.1, step=0.1)
+fibQty_618 = input.float(25, "Fib 0.618 Qty (%)", group="Fib Order Sizes", minval=0.1, step=0.1)
+
+// Fibonacci Levels
+fibLevel_236 = 0.236
+fibLevel_382 = 0.382
+fibLevel_50  = 0.5
+fibLevel_618 = 0.618
+
+//=====================================================================================
+// ⏳ FIXED TIME FILTER (Choose Either Days OR Hours)
+//=====================================================================================
+f_timeStartFilter() =>
+    nowMs = timenow * 1000.0 
+    offsetMs = 0.0
+    if startFromHoursAgo > 0
+        offsetMs := startFromHoursAgo * 3600000.0  // Use Hours if set
+    else
+        offsetMs := startFromDaysAgo * 24.0 * 3600000.0  // Use Days if Hours = 0
+    nowMs - offsetMs
+
+var float startTradingTs = na
+if barstate.isfirst
+    startTradingTs := f_timeStartFilter()
+
+bool allowTrading = not useStartTime or (time >= startTradingTs)
+
+//=====================================================================================
+// 🔄 WAVE DETECTION LOGIC (Checking if the current candle starts a new wave)
+//=====================================================================================
+var float[] waveTops = array.new_float()
+var float[] waveBottoms = array.new_float()
+var bool[] waveConfirmed = array.new_bool()
+var bool[] waveClosed = array.new_bool()
+var bool[] placedFib236 = array.new_bool()
+var bool[] placedFib382 = array.new_bool()
+var bool[] placedFib50 = array.new_bool()
+var bool[] placedFib618 = array.new_bool()
+
+var float highestCloseSoFar = na
+
+if barstate.isfirst
+    highestCloseSoFar := close
+
+// ✅ **Extract `ta.lowest()` calculation (Avoid Warnings)**
+float lowestLow5 = ta.lowest(low, 5)
+float lowestLowConfirmation = ta.lowest(low, 3)  // Used for wave confirmation
+
+// ✅ **Fibonacci Up Move Starts Here** → The **next candle must NOT touch the 0.5 level of the previous one**
+if allowTrading
+    previousMidLevel = (high[1] + low[1]) / 2
+    if low > previousMidLevel  // 🔥 Condition to detect new Fibonacci impulse
+        waveTop = high
+        waveBottom = lowestLow5  // Find lowest low in last 5 bars
+        array.push(waveTops, waveTop)
+        array.push(waveBottoms, waveBottom)
+        array.push(waveConfirmed, false)
+        array.push(waveClosed, false)
+        array.push(placedFib236, false)
+        array.push(placedFib382, false)
+        array.push(placedFib50, false)
+        array.push(placedFib618, false)
+        highestCloseSoFar := close
+
+// 🟢 Confirm Waves based on the 0.5 Rule (Next candle must not break 0.5)
+if array.size(waveTops) > 0
+    for i = 0 to array.size(waveTops) - 1
+        if not array.get(waveConfirmed, i) and not array.get(waveClosed, i)
+            waveTop = array.get(waveTops, i)
+            waveBottom = array.get(waveBottoms, i)
+            fibHalf = waveTop - (waveTop - waveBottom) * 0.5
+            if lowestLowConfirmation > fibHalf  // ✅ Confirmation Rule
+                array.set(waveConfirmed, i, true)
+
+//=====================================================================================
+// 📌 PLACE BUY ORDERS AT FIBONACCI LEVELS
+//=====================================================================================
+if allowTrading and array.size(waveTops) > 0
+    for i = 0 to array.size(waveTops) - 1
+        if array.get(waveConfirmed, i) and not array.get(waveClosed, i)
+            waveTop = array.get(waveTops, i)
+            waveBottom = array.get(waveBottoms, i)
+
+            fib236 = waveTop - (waveTop - waveBottom) * fibLevel_236
+            fib382 = waveTop - (waveTop - waveBottom) * fibLevel_382
+            fib50  = waveTop - (waveTop - waveBottom) * fibLevel_50
+            fib618 = waveTop - (waveTop - waveBottom) * fibLevel_618
+
+            // 🟢 **Buy at Fib Levels**
+            if close <= fib236 and not array.get(placedFib236, i)
+                strategy.order("FibBuy_236_" + str.tostring(i), strategy.long, limit=fib236, qty=fibQty_236)
+                array.set(placedFib236, i, true)
+
+            if close <= fib382 and not array.get(placedFib382, i)
+                strategy.order("FibBuy_382_" + str.tostring(i), strategy.long, limit=fib382, qty=fibQty_382)
+                array.set(placedFib382, i, true)
+
+            if close <= fib50 and not array.get(placedFib50, i)
+                strategy.order("FibBuy_50_" + str.tostring(i), strategy.long, limit=fib50, qty=fibQty_50)
+                array.set(placedFib50, i, true)
+
+            if close <= fib618 and not array.get(placedFib618, i)
+                strategy.order("FibBuy_618_" + str.tostring(i), strategy.long, limit=fib618, qty=fibQty_618)
+                array.set(placedFib618, i, true)
+
+//=====================================================================================
+// 📈 TAKE PROFIT (Exit at 0.0 Fibonacci Level)
+//=====================================================================================
+if allowTrading and array.size(waveTops) > 0
+    for i = 0 to array.size(waveTops) - 1
+        if not array.get(waveClosed, i)
+            waveTop = array.get(waveTops, i)
+            if high > waveTop  // ✅ **Exit when price crosses waveTop**
+                array.set(waveClosed, i, true)
+                strategy.close("FibBuy_236_" + str.tostring(i))
+                strategy.close("FibBuy_382_" + str.tostring(i))
+                strategy.close("FibBuy_50_" + str.tostring(i))
+                strategy.close("FibBuy_618_" + str.tostring(i))

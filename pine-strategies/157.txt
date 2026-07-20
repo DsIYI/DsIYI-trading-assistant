@@ -1,0 +1,72 @@
+//@version=6
+strategy("Supertrend Reversible Strategy", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_order_fills=true)
+
+// === Manual Backtesting Time Window ===
+fromYear   = input.int(2023, "From Year")
+fromMonth  = input.int(1, "From Month")
+fromDay    = input.int(1, "From Day")
+toYear     = input.int(2025, "To Year")
+toMonth    = input.int(12, "To Month")
+toDay      = input.int(31, "To Day")
+inDateRange = (time >= timestamp(fromYear, fromMonth, fromDay, 00, 00)) and (time <= timestamp(toYear, toMonth, toDay, 23, 59))
+
+// === Supertrend Inputs ===
+atrPeriod   = input.int(10, title="ATR Period")
+src         = input.source(hl2, title="Source")
+atrMult     = input.float(3.0, title="ATR Multiplier", step=0.1)
+changeATR   = input.bool(true, title="Use Standard ATR Instead of SMA(TR)?")
+showSignals = input.bool(true, title="Show Buy/Sell Signals?")
+highlighting = input.bool(true, title="Highlight Trend?")
+
+// === Trailing Stop Loss ===
+enableTSL     = input.bool(true, title="Enable Trailing Stop-Loss")
+tslPercent    = input.float(0.500, title="Trailing Stop-Loss %", minval=0.001, step=0.001)
+
+// === ATR Calculation ===
+atr = changeATR ? ta.atr(atrPeriod) : ta.sma(ta.tr, atrPeriod)
+
+// === Supertrend Logic ===
+up   = src - atrMult * atr
+dn   = src + atrMult * atr
+up1  = nz(up[1], up)
+dn1  = nz(dn[1], dn)
+up   := close[1] > up1 ? math.max(up, up1) : up
+dn   := close[1] < dn1 ? math.min(dn, dn1) : dn
+
+trend = 1
+trend := nz(trend[1], trend)
+trend := trend == -1 and close > dn1 ? 1 : trend == 1 and close < up1 ? -1 : trend
+
+buySignal  = trend == 1 and trend[1] == -1
+sellSignal = trend == -1 and trend[1] == 1
+
+// === Plotting Supertrend Lines ===
+plot(trend == 1 ? up : na, title="Up Trend", color=color.green, linewidth=2)
+plot(trend == -1 ? dn : na, title="Down Trend", color=color.red, linewidth=2)
+
+// === Background Highlight ===
+bgcolor(highlighting ? (trend == 1 ? color.new(color.green, 90) : trend == -1 ? color.new(color.red, 90) : na) : na)
+
+// === Strategy Execution ===
+var float longStopPrice  = na
+var float shortStopPrice = na
+
+if inDateRange
+    if buySignal
+        strategy.entry("Buy Long", strategy.long, comment="Buy Long")
+        if enableTSL
+            longStopPrice := close * (1 - tslPercent / 100)
+
+    if sellSignal
+        strategy.entry("Sell Short", strategy.short, comment="Sell Short")
+        if enableTSL
+            shortStopPrice := close * (1 + tslPercent / 100)
+
+// === Trailing Stop Loss Logic ===
+if enableTSL and strategy.position_size > 0
+    longStopPrice := math.max(longStopPrice, close * (1 - tslPercent / 100))
+    strategy.exit("TSL Long Exit", from_entry="Buy Long", stop=longStopPrice)
+
+if enableTSL and strategy.position_size < 0
+    shortStopPrice := math.min(shortStopPrice, close * (1 + tslPercent / 100))
+    strategy.exit("TSL Short Exit", from_entry="Sell Short", stop=shortStopPrice)

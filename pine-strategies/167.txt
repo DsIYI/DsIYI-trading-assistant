@@ -1,0 +1,82 @@
+//@version=6
+strategy("Improved Line Break Strategy (Full Functional)", overlay=true)
+
+// Inputs
+emaShortLength = input.int(9, "Short EMA Length", minval=1)
+emaLongLength = input.int(21, "Long EMA Length", minval=1)
+
+// RSI Filter
+useRSI = input.bool(true, "Use RSI Filter")
+rsiLength = input.int(14, "RSI Length", minval=1)
+rsiOverbought = input.int(70, "RSI Overbought Level", minval=50, maxval=100)
+rsiOversold = input.int(30, "RSI Oversold Level", minval=0, maxval=50)
+
+// Stop-Loss and Take-Profit
+stoploss_percent = input.float(1.0, "Stop-Loss %", minval=0.001, step=0.1) / 100
+trailing_tp_percent = input.float(1.5, "Trailing Take Profit %", minval=0.001, step=0.1) / 100
+
+// Trade Delay (New)
+trade_delay_sec = input.int(5, "Trade Delay (Seconds)", minval=1, maxval=60)
+
+// Backtesting Window
+FromMonth = input.int(1, "From Month", minval=1, maxval=12)
+FromDay = input.int(1, "From Day", minval=1, maxval=31)
+FromYear = input.int(2025, "From Year", minval=2025)
+ToMonth = input.int(12, "To Month", minval=1, maxval=12)
+ToDay = input.int(31, "To Day", minval=1, maxval=31)
+ToYear = input.int(2025, "To Year", minval=2025)
+start = timestamp(FromYear, FromMonth, FromDay, 00, 00)
+finish = timestamp(ToYear, ToMonth, ToDay, 23, 59)
+window() =>
+    time >= start and time <= finish
+
+// Calculations
+emaShort = ta.ema(close, emaShortLength)
+emaLong = ta.ema(close, emaLongLength)
+rsiValue = ta.rsi(close, rsiLength)
+
+// Conditions
+long_condition = close > emaShort and emaShort > emaLong and (not useRSI or rsiValue < rsiOversold)
+short_condition = close < emaShort and emaShort < emaLong and (not useRSI or rsiValue > rsiOverbought)
+
+// Reversible Trading Logic with Webhook Alerts
+if (long_condition and window())
+    if (strategy.position_size < 0)  // If a short trade is open, close it first
+        strategy.close("Short")
+        alert('{"action":"sell","symbol":"{{ticker}}","marketPosition":"FLAT","price":"{{close}}","time":"{{timenow}}"}', alert.freq_once_per_bar)
+
+    // Immediate Long Entry after closing the short position in the same bar
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Trailing TP", "Long", trail_offset=trailing_tp_percent * close, stop=close * (1 - stoploss_percent))
+
+    // Send Webhook Alert with Delay
+    alert('{"action":"buy","symbol":"{{ticker}}","marketPosition":"LONG","price":"{{close}}","time":"{{timenow}}","delay":"' + str.tostring(trade_delay_sec) + '"}', alert.freq_once_per_bar)
+
+if (short_condition and window())
+    if (strategy.position_size > 0)  // If a long trade is open, close it first
+        strategy.close("Long")
+        alert('{"action":"sell","symbol":"{{ticker}}","marketPosition":"FLAT","price":"{{close}}","time":"{{timenow}}"}', alert.freq_once_per_bar)
+
+    // Immediate Short Entry after closing the long position in the same bar
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Trailing TP", "Short", trail_offset=trailing_tp_percent * close, stop=close * (1 + stoploss_percent))
+
+    // Send Webhook Alert with Delay
+    alert('{"action":"sell","symbol":"{{ticker}}","marketPosition":"SHORT","price":"{{close}}","time":"{{timenow}}","delay":"' + str.tostring(trade_delay_sec) + '"}', alert.freq_once_per_bar)
+
+// Ensure new trades are made immediately after Take-Profit is executed
+if (strategy.position_size == 0 and window())  // No active position
+    // Re-enter a position immediately after Take-Profit is hit
+    if (long_condition)
+        strategy.entry("Long", strategy.long)
+        alert('{"action":"buy","symbol":"{{ticker}}","marketPosition":"LONG","price":"{{close}}","time":"{{timenow}}"}', alert.freq_once_per_bar)
+    
+    if (short_condition)
+        strategy.entry("Short", strategy.short)
+        alert('{"action":"sell","symbol":"{{ticker}}","marketPosition":"SHORT","price":"{{close}}","time":"{{timenow}}"}', alert.freq_once_per_bar)
+
+// Plotting for Debugging
+plot(emaShort, title="Short EMA", color=color.green)
+plot(emaLong, title="Long EMA", color=color.red)
+plotshape(series=long_condition, title="Long Signal", location=location.belowbar, color=color.green, style=shape.labelup, text="BUY")
+plotshape(series=short_condition, title="Short Signal", location=location.abovebar, color=color.red, style=shape.labeldown, text="SELL")

@@ -1,0 +1,133 @@
+//@version=5
+strategy("Crypto Engulfing Strategy", overlay=true, margin_long=100, margin_short=100)
+
+// === INPUTS ===
+strategyVariant = input.string("3.1.1.1", "Strategy Variant", ["3.1.1.1", "3.1.1.2", "3.1.2", "3.1.3"])
+stopLossType = input.string("Hard", "Stop-Loss Type", ["Hard", "Trailing"])
+hardStopLossPct = input.float(1.0, "Hard Stop-Loss %", minval=0.001, step=0.001)
+trailingStopLossPct = input.float(1.0, "Trailing Stop-Loss %", minval=0.001, step=0.001)
+trailingTakeProfitPct = input.float(2.0, "Trailing Take-Profit %", minval=0.001, step=0.001)
+order1SizePct = input.float(1.0, "Order 1 Size %", minval=0.1, step=0.1)
+order2SizePct = input.float(0.5, "Order 2 Size %", minval=0.1, step=0.1)
+order3SizePct = input.float(0.25, "Order 3 Size %", minval=0.1, step=0.1)
+fromMonth = input.int(1, "From Month", minval=1, maxval=12)
+fromDay = input.int(1, "From Day", minval=1, maxval=31)
+fromYear = input.int(2025, "From Year", minval=2025)
+toMonth = input.int(1, "To Month", minval=1, maxval=12)
+toDay = input.int(1, "To Day", minval=1, maxval=31)
+toYear = input.int(9999, "To Year", minval=2025)
+
+// === TIME WINDOW FUNCTION ===
+window() =>
+    start = timestamp(fromYear, fromMonth, fromDay, 00, 00)
+    finish = timestamp(toYear, toMonth, toDay, 23, 59)
+    time >= start and time <= finish
+
+// === ENGULFING LOGIC ===
+bullishEngulfing() => open <= close[1] and open < open[1] and close > open[1]
+bearishEngulfing() => open >= close[1] and open > open[1] and close < open[1]
+
+// Plot signals for visual identification
+plotshape(bullishEngulfing(), style=shape.triangleup, location=location.belowbar, color=color.green, size=size.tiny, title="Bullish Engulfing")
+plotshape(bearishEngulfing(), style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, title="Bearish Engulfing")
+
+// === STOP-LOSS AND TAKE-PROFIT CALCULATIONS ===
+getStopLossLevel(direction) =>
+    float level = na
+    if direction == strategy.direction.long
+        level := stopLossType == "Hard" ? strategy.position_avg_price * (1 - hardStopLossPct / 100) : ta.highest(high, 10) * (1 - trailingStopLossPct / 100)
+    else if direction == strategy.direction.short
+        level := stopLossType == "Hard" ? strategy.position_avg_price * (1 + hardStopLossPct / 100) : ta.lowest(low, 10) * (1 + trailingStopLossPct / 100)
+    level
+
+getTrailingTakeProfitLevel(direction) =>
+    float level = na
+    if direction == strategy.direction.long
+        level := strategy.position_avg_price * (1 + trailingTakeProfitPct / 100)
+    else if direction == strategy.direction.short
+        level := strategy.position_avg_price * (1 - trailingTakeProfitPct / 100)
+    level
+
+// === ORDER SIZE CALCULATION ===
+getOrderSize(orderCount) =>
+    orderCount == 0 ? order1SizePct : orderCount == 1 ? order2SizePct : order3SizePct
+
+// === STRATEGY LOGIC ===
+var int longOrderCount = 0
+var int shortOrderCount = 0
+
+// Reset order counts for variants 3.1.2 and 3.1.3
+if bullishEngulfing() and strategyVariant != "3.1.1.1"
+    longOrderCount := 0
+if bearishEngulfing() and strategyVariant != "3.1.1.1"
+    shortOrderCount := 0
+
+// Variant 3.1.1.1: Single Buy on Bearish, Single Short on Bullish, Reverse Position
+if strategyVariant == "3.1.1.1" and window()
+    if bearishEngulfing() and strategy.position_size == 0
+        strategy.entry("Long", strategy.long, qty=order1SizePct, comment="Buy on Bearish")
+    if bullishEngulfing() and strategy.position_size > 0
+        strategy.close("Long", comment="Close Long")
+        strategy.entry("Short", strategy.short, qty=order1SizePct, comment="Short on Bullish")
+
+// Variant 3.1.1.2: Single Buy on Bearish, Single Short on Bullish, Trailing TP
+if strategyVariant == "3.1.1.2" and window()
+    if bearishEngulfing() and strategy.position_size == 0
+        strategy.entry("Long", strategy.long, qty=order1SizePct, comment="Buy on Bearish")
+    if bullishEngulfing() and strategy.position_size == 0
+        strategy.entry("Short", strategy.short, qty=order1SizePct, comment="Short on Bullish")
+    if strategy.position_size > 0 and close >= getTrailingTakeProfitLevel(strategy.direction.long)
+        strategy.close("Long", comment="Trailing TP Long")
+    if strategy.position_size < 0 and close <= getTrailingTakeProfitLevel(strategy.direction.short)
+        strategy.close("Short", comment="Trailing TP Short")
+
+// Variant 3.1.2: Up to 3 Orders, Close on Opposite Signal
+if strategyVariant == "3.1.2" and window()
+    if bearishEngulfing() and longOrderCount < 3
+        strategy.entry("Long" + str.tostring(longOrderCount + 1), strategy.long, qty=getOrderSize(longOrderCount), comment="Buy " + str.tostring(longOrderCount + 1))
+        longOrderCount := longOrderCount + 1
+    if bullishEngulfing() and shortOrderCount < 3
+        strategy.entry("Short" + str.tostring(shortOrderCount + 1), strategy.short, qty=getOrderSize(shortOrderCount), comment="Short " + str.tostring(shortOrderCount + 1))
+        shortOrderCount := shortOrderCount + 1
+    if bullishEngulfing() and longOrderCount > 0
+        strategy.close_all(comment="Close All Longs on Bullish")
+        longOrderCount := 0
+    if bearishEngulfing() and shortOrderCount > 0
+        strategy.close_all(comment="Close All Shorts on Bearish")
+        shortOrderCount := 0
+
+// Variant 3.1.3: Up to 3 Orders, Trailing TP
+if strategyVariant == "3.1.3" and window()
+    if bearishEngulfing() and longOrderCount < 3
+        strategy.entry("Long" + str.tostring(longOrderCount + 1), strategy.long, qty=getOrderSize(longOrderCount), comment="Buy " + str.tostring(longOrderCount + 1))
+        longOrderCount := longOrderCount + 1
+    if bullishEngulfing() and shortOrderCount < 3
+        strategy.entry("Short" + str.tostring(shortOrderCount + 1), strategy.short, qty=getOrderSize(shortOrderCount), comment="Short " + str.tostring(shortOrderCount + 1))
+        shortOrderCount := shortOrderCount + 1
+    if longOrderCount > 0 and close >= getTrailingTakeProfitLevel(strategy.direction.long)
+        strategy.close_all(comment="Trailing TP Long")
+        longOrderCount := 0
+    if shortOrderCount > 0 and close <= getTrailingTakeProfitLevel(strategy.direction.short)
+        strategy.close_all(comment="Trailing TP Short")
+        shortOrderCount := 0
+
+// === STOP-LOSS LOGIC ===
+if strategy.position_size > 0
+    strategy.exit("Exit Long", "Long", stop=getStopLossLevel(strategy.direction.long))
+if strategy.position_size < 0
+    strategy.exit("Exit Short", "Short", stop=getStopLossLevel(strategy.direction.short))
+
+// === ALERT SETUP INSTRUCTIONS ===
+// To set up alerts in TradingView:
+// 1. Add the strategy to the chart.
+// 2. Go to the "Alerts" tab.
+// 3. Create a new alert and select "Crypto Engulfing Strategy" as the condition.
+// 4. Choose "Order Fills" to get notified when a Buy or Short order is executed.
+// 5. Alternatively, create a separate indicator for Bullish/Bearish Engulfing signals:
+// indicator("Engulfing Alerts", overlay=true)
+// bullishEngulfing = (open <= close[1]) and (open < open[1]) and (close > open[1])
+// bearishEngulfing = (open >= close[1]) and (open > open[1]) and (close < open[1])
+// plotshape(bullishEngulfing, style=shape.triangleup, location=location.belowbar, color=color.green, size=size.tiny, title="Bullish Engulfing")
+// plotshape(bearishEngulfing, style=shape.triangledown, location=location.abovebar, color=color.red, size=size.tiny, title="Bearish Engulfing")
+// alertcondition(bullishEngulfing, title="Bullish Engulfing", message="[CurrencyPair] [TimeFrame], Bullish candle engulfing previous candle")
+// alertcondition(bearishEngulfing, title="Bearish Engulfing", message="[CurrencyPair] [TimeFrame], Bearish candle engulfing previous candle")
